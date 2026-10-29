@@ -5,6 +5,7 @@ import { parseTurn } from './trajectory.js';
 import { assess, nextState, isNewTurn } from './policy.js';
 import { judge } from './judge.js';
 import { lunaDecide, combineEffort } from './decisions.js';
+import { ruleRole } from './roles.js';
 
 // OpenAI key shapes: project, service-account and admin keys, and legacy `sk-` + 40+ letters
 // and digits. Other vendors' `sk-` keys (sk-or-, sk-ant-, ...) have a different prefix.
@@ -59,7 +60,7 @@ export function decisionOptions(config, apiKey) {
 
 const MAX_SESSIONS = 500;
 // Resume bookkeeping that lives for one turn and survives the per-generation effort state.
-const TURN_FIELDS = ['continues', 'stalls', 'mark', 'reviews', 'reviewedEdits', 'focus'];
+const TURN_FIELDS = ['continues', 'stalls', 'mark', 'reviews', 'reviewedEdits', 'focus', 'role', 'roleSource'];
 
 function turnFields(prev) {
   const out = {};
@@ -67,7 +68,7 @@ function turnFields(prev) {
   return out;
 }
 
-export function createRouter(config, { judgeFn = judge, decideFn = lunaDecide } = {}) {
+export function createRouter(config, { judgeFn = judge, decideFn = lunaDecide, roles = [] } = {}) {
   const sessions = new Map();
   const ladder = config.ladder;
   const defaultLevel = Math.max(0, ladder.indexOf(config.defaultEffort));
@@ -83,12 +84,15 @@ export function createRouter(config, { judgeFn = judge, decideFn = lunaDecide } 
     const mode = effectiveMode(config, apiKey);
     if (mode === 'luna') {
       try {
-        const d = await decideFn(turn, { ...decisionOptions(config, apiKey), ladder, minConfidence: config.minConfidence, quantile: config.effortQuantile });
+        const d = await decideFn(turn, {
+          ...decisionOptions(config, apiKey), ladder, minConfidence: config.minConfidence, quantile: config.effortQuantile,
+          roles, roleMinConfidence: config.roleMinConfidence,
+        });
         const useLuna = turn.steps.length === 0 || d.target > heuristic.target;
         return { a: combineEffort(d, heuristic, turn.steps.length === 0), source: useLuna ? 'luna' : 'heuristic (luna considered)', cost: d.cost ?? null,
-          suggestions: { luna: ladder[d.target], heuristic: ladder[heuristic.target] } };
+          suggestions: { luna: ladder[d.target], heuristic: ladder[heuristic.target] }, lunaRole: d.role };
       } catch (err) {
-        return { a: heuristic, source: `heuristic (luna failed: ${failureText(err)})`, cost: null };
+        return { a: heuristic, source: `heuristic (luna failed: ${failureText(err)})`, cost: null, lunaRole: err?.role };
       }
     }
     if (mode === 'llm' && judgeTarget && step > 1) {
@@ -108,6 +112,15 @@ export function createRouter(config, { judgeFn = judge, decideFn = lunaDecide } 
     return { a: heuristic, source: 'heuristic', cost: null };
   }
 
+  // The specialist for a new turn: Luna's pick when it was asked (its "none" stands), else
+  // the request's words. Nothing without packs.
+  function pickRole(turn, lunaRole) {
+    if (roles.length === 0) return {};
+    if (lunaRole !== undefined) return lunaRole ? { role: lunaRole, roleSource: 'luna' } : {};
+    const id = ruleRole(turn.userText, roles);
+    return id ? { role: id, roleSource: 'rules' } : {};
+  }
+
   /**
    * @param {object} body Responses or Chat Completions request body
    * @param {string} sessionKey
@@ -122,10 +135,10 @@ export function createRouter(config, { judgeFn = judge, decideFn = lunaDecide } 
     const started = performance.now();
     const step = turn.steps.length + 1;
     const prev = sessions.get(sessionKey);
-    const { a, source, cost, suggestions } = await assessTurn(body, judgeTarget, turn, step, auth.apiKey);
+    const { a, source, cost, suggestions, lunaRole } = await assessTurn(body, judgeTarget, turn, step, auth.apiKey);
     const fresh = isNewTurn(prev, step);
     let state = nextState(prev, a, step);
-    const kept = fresh ? { continues: 0 } : { continues: 0, ...turnFields(prev) };
+    const kept = fresh ? { continues: 0, ...pickRole(turn, lunaRole) } : { continues: 0, ...turnFields(prev) };
     if (kept.continues > 0 && state.level < defaultLevel) {
       // The model already tried to stop early this turn; low effort is where it gets lazy.
       state = { ...state, level: defaultLevel, reasons: [...state.reasons, 'resumed turn keeps default effort'] };
@@ -138,6 +151,7 @@ export function createRouter(config, { judgeFn = judge, decideFn = lunaDecide } 
       hold: state.hold,
       reasons: state.reasons,
       source,
+      ...(kept.role ? { role: kept.role, roleSource: kept.roleSource } : {}),
       ...(suggestions ? { suggestions } : {}),
       ...(state.level !== a.target ? { adjustment: 'session policy' } : {}),
       cost,

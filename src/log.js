@@ -18,7 +18,7 @@ export function formatDecision(d) {
   const levels = effortLevels(d);
   const reasons = d.reasons ?? [];
   const gens = Math.max(1, d.hold);
-  const detail = [ ...(d.id ? [`id: ${d.id}`] : []), `Step ${d.step}`, ...(d.source ? [`source: ${d.source}`] : []), ...(d.suggestions ? [`luna: ${d.suggestions.luna}, heuristic: ${d.suggestions.heuristic}`] : []), ...(d.adjustment ? [d.adjustment] : []), ...(d.effort ? [`next ${gens} generation(s)`] : []), `${d.ms} ms`, reasons.join('; ')];
+  const detail = [ ...(d.id ? [`id: ${d.id}`] : []), `Step ${d.step}`, ...(d.source ? [`source: ${d.source}`] : []), ...(d.role ? [`role: ${d.role} (${d.roleSource})`] : []), ...(d.suggestions ? [`luna: ${d.suggestions.luna}, heuristic: ${d.suggestions.heuristic}`] : []), ...(d.adjustment ? [d.adjustment] : []), ...(d.effort ? [`next ${gens} generation(s)`] : []), `${d.ms} ms`, reasons.join('; ')];
   return `${C.blue}Luna${C.reset}  ${C.bold}${levels}${C.reset}  ${C.green}SELECTED${C.reset}\n`
     + `${C.dim}     ${detail.join(' · ')}${C.reset}`;
 }

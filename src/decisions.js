@@ -12,6 +12,7 @@
 // lunaStopCheck): the rules' escalation for a failing agent always stands.
 import { createHash } from 'node:crypto';
 import { assessStop } from './longtask.js';
+import { roleQuestion, roleFromAnswer } from './roles.js';
 
 const MAX_REQUEST = 2000;
 const MAX_CLOSING = 800;
@@ -362,11 +363,17 @@ const MAX_RETRY_AFTER_MS = 600_000;
 const pausedUntil = new Map();
 // Set when the API rejects explicit cache breakpoints; later calls use the implicit mode.
 let explicitCacheRejected = false;
+// When the API last rejected a call with the specialist question while the same call without it
+// went through (too many choices, say). For ROLE_RETRY_MS after that, calls leave the question
+// out and the rules pick the specialist.
+let roleQuestionRejectedAt = 0;
+const ROLE_RETRY_MS = 30 * 60_000;
 
 /** Ends every pause and forgets a rejected cache mode; for tests. */
 export function resetLunaPause() {
   pausedUntil.clear();
   explicitCacheRejected = false;
+  roleQuestionRejectedAt = 0;
 }
 
 function pauseKey(opts) {
@@ -435,14 +442,40 @@ export async function postDecision(opts, state, questions) {
  * @param {{userText:string, steps:Array<{kind:string, command:string, failed:boolean|null}>}} turn
  * @param {{url:string, apiKey:string, model:string, timeoutMs:number, ladder:string[],
  *   minConfidence:number, quantile?:number, cacheMode?:string}} opts
+ *   roles?: the specialists to choose from on a new turn (roles.js), roleMinConfidence?: number
  * @returns {Promise<{target:number, hold:number, release:boolean, stuck:number|null, reasons:string[],
- *   cost:number|null, tokens:{input:number, cached:number}|null}>}
+ *   cost:number|null, tokens:{input:number, cached:number}|null, role?:string|null}>} role: the
+ *   specialist id, null for none, absent when the question was not asked
  */
 export async function lunaDecide(turn, opts) {
   const { state, questions } = effortCall(turn, opts.ladder);
-  const body = await postDecision(opts, state, questions);
-  const assessment = toAssessment(answersByName(body), opts.ladder, opts.minConfidence, opts.quantile ?? 0.5);
-  return { ...assessment, ...callCost(body?.usage) };
+  // On a new turn the same call also asks which specialist should do the request.
+  let roles = turn.steps.length === 0 && turn.userText && opts.roles?.length
+    && Date.now() - roleQuestionRejectedAt >= ROLE_RETRY_MS ? opts.roles : null;
+  let body;
+  try {
+    body = await postDecision(opts, state, roles ? [...questions, roleQuestion(roles)] : questions);
+  } catch (err) {
+    if (!roles || !/^Luna HTTP 400\b/.test(err.message)) throw err;
+    roles = null;
+    body = await postDecision(opts, state, questions);
+    // Only now is the question known to be what the API refused.
+    roleQuestionRejectedAt = Date.now();
+  }
+  const answers = answersByName(body);
+  // undefined: not asked or not answered (the rules pick); null: Luna named no specialist or was unsure.
+  const role = roles && answers.role?.type === 'choice'
+    ? roleFromAnswer(answers.role, roles, opts.roleMinConfidence ?? 0.4)?.id ?? null
+    : undefined;
+  let assessment;
+  try {
+    assessment = toAssessment(answers, opts.ladder, opts.minConfidence, opts.quantile ?? 0.5);
+  } catch (err) {
+    // An abstained effort still carries the specialist Luna picked.
+    if (role !== undefined) err.role = role;
+    throw err;
+  }
+  return { ...assessment, ...callCost(body?.usage), ...(role !== undefined ? { role } : {}) };
 }
 
 /** The end of the closing text, where a promise or a question to the user sits. */

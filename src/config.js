@@ -104,6 +104,14 @@ export function loadConfig(env = process.env) {
     mode,
     // What LUNA_MODE=auto does for a request without a Luna key: the free rules, or the LLM judge.
     autoFallback: oneOf(env, 'LUNA_AUTO_FALLBACK', 'heuristic', ['heuristic', 'llm']),
+    // Specialists: packs (agent-team-workflow .zip/folder, or skill packs), `;`-separated, each
+    // optionally `|set`. Empty turns the feature off. On a new turn Luna picks one of them.
+    rolePack: (env.LUNA_ROLE_PACK || '').trim(),
+    roleSet: (env.LUNA_ROLE_SET || '').trim(),
+    // Below this confidence Luna's pick is ignored (no specialist for the turn).
+    roleMinConfidence: probabilityEnv(env, 'LUNA_ROLE_MIN_CONFIDENCE', 0.4),
+    // Also suggest the pack's native Codex subagent (team_<role>) for the chosen role.
+    roleDelegate: switchEnv(env, 'LUNA_ROLE_DELEGATE', 'off'),
     // How the Codex profile authenticates the main model: the ChatGPT login, OPENAI_API_KEY or
     // OPENROUTER_API_KEY. The proxy picks the upstream from the key the client sends.
     provider: oneOf(env, 'LUNA_PROVIDER', 'chatgpt', ['chatgpt', 'openai', 'openrouter']),

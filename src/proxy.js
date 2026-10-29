@@ -20,6 +20,7 @@ import {
   continuationBody, developerMessage, forwardHeaders, isEventStream, pipeWithContinuation, writeChunk, writeUpstreamHead,
 } from './splice.js';
 import { VERSION, BUILD, APP } from './version.js';
+import { loadRoles, roleText } from './roles.js';
 
 const DECODERS = {
   zstd: (b) => zlib.zstdDecompressSync(b),
@@ -75,6 +76,12 @@ const MAX_JSON_SNIFF = 4 * 1024 * 1024;
 // Data lines that can carry the final usage or a reasoning item; other lines are not parsed.
 const SNIFF_MARKERS = ['"usage"', 'output_item.done'];
 
+// A Responses input as a list of items: a bare string is one user message.
+function inputItems(input) {
+  if (typeof input === 'string') return [{ type: 'message', role: 'user', content: input }];
+  return Array.isArray(input) ? input : [];
+}
+
 // Per-protocol hooks: how to read the trajectory, whether the request is a
 // reasoning request, how to rewrite its effort, and where a plan reminder goes.
 const PROTOCOLS = {
@@ -82,7 +89,7 @@ const PROTOCOLS = {
     parse: (body) => parseTurn(body.input),
     wantsReasoning: (body) => body.reasoning != null && typeof body.reasoning === 'object',
     apply: (body, effort) => ({ ...body, reasoning: { ...body.reasoning, effort } }),
-    remind: (body, text) => ({ ...body, input: [...(Array.isArray(body.input) ? body.input : []), developerMessage(text)] }),
+    remind: (body, text) => ({ ...body, input: [...inputItems(body.input), developerMessage(text)] }),
     session: sessionKeyOf,
     judge: true,
   },
@@ -190,12 +197,26 @@ function describeSent(decision, { applyEffort, model, requested }) {
   };
 }
 
-// The copy of a request that carries the reminders at its end (the plan's open steps, and the
-// focus of the turn's last resume), or null when there is nothing to remind.
-function withReminder(protocol, body, focus) {
-  const plan = turnPlan(body);
-  const texts = [...(plan?.open.length > 0 ? [nudgeText(plan)] : []), ...(focus ? [focus] : [])];
-  return texts.length > 0 ? protocol.remind(body, texts.join('\n\n')) : null;
+// The copy of a request that carries the reminders at its end (the specialist of the turn,
+// the plan's open steps and the focus of the turn's last resume), or null when there is none.
+// nudged: whether a plan or focus reminder is among them (not only the specialist).
+function withReminder(protocol, body, { role, nudge, focus }) {
+  const plan = nudge ? turnPlan(body) : null;
+  const nudges = [...(plan?.open.length > 0 ? [nudgeText(plan)] : []), ...(focus ? [focus] : [])];
+  const texts = [...(role ? [role] : []), ...nudges];
+  return texts.length > 0 ? { body: protocol.remind(body, texts.join('\n\n')), nudged: nudges.length > 0 } : null;
+}
+
+// The specialists of LUNA_ROLE_PACK. A pack that cannot be read costs the specialists, not
+// the proxy: effort routing carries on without them.
+function packRoles(config, print) {
+  if (!config.rolePack) return [];
+  try {
+    return loadRoles(config.rolePack, config.roleSet).roles;
+  } catch (err) {
+    print(`[luna] warning: no specialists: ${err.message}`);
+    return [];
+  }
 }
 
 // The error text for a stop-check fallback: one line, at most MAX_FAILURE_NOTE characters.
@@ -205,12 +226,14 @@ function failureNote(err) {
 }
 
 export function createProxy(config, deps = {}) {
-  const router = createRouter(config, deps);
-  const log = deps.log ?? createDecisionLog(config);
   const print = deps.print ?? ((s) => process.stdout.write(`${s}\n`));
+  const roles = deps.roles ?? packRoles(config, print);
+  const roleById = new Map(roles.map((r) => [r.id, r]));
+  const router = createRouter(config, { ...deps, roles });
+  const log = deps.log ?? createDecisionLog(config);
   const openRouterOf = deps.isOpenRouter ?? isOpenRouter;
   const stopCheckFn = deps.stopCheckFn ?? lunaStopCheck;
-  const stats = { requests: 0, routed: 0, byEffort: {}, reasoningTokens: {}, continued: 0, reviewed: 0, nudged: 0 };
+  const stats = { requests: 0, routed: 0, byEffort: {}, reasoningTokens: {}, continued: 0, reviewed: 0, nudged: 0, byRole: {} };
   const identity = { app: APP, version: VERSION, build: BUILD, pid: process.pid, startedAt: new Date().toISOString(), eventStream: true };
 
   // Effort for this generation, or null when the request is left alone.
@@ -384,9 +407,14 @@ export function createProxy(config, deps = {}) {
     if (decision) body = rewriteRequest(protocol, body, decision, { applyEffort, inject, openRouter, routeModel });
     // The focus of a resume only matters where resumes happen (streamed Responses).
     const focus = protocol === PROTOCOLS.responses && config.continueTurns ? router.focusOf(session) : null;
-    const reminded = decision && config.nudge && config.mode !== 'off' ? withReminder(protocol, body, focus) : null;
-    if (reminded) stats.nudged++;
-    body = reminded ?? body;
+    const role = decision?.role ? roleById.get(decision.role) : null;
+    const roleNote = role ? roleText(role, { delegate: config.roleDelegate }) : null;
+    const reminded = decision && config.mode !== 'off'
+      ? withReminder(protocol, body, { role: roleNote, nudge: config.nudge, focus: config.nudge ? focus : null })
+      : null;
+    if (reminded?.nudged) stats.nudged++;
+    if (role && decision.step === 1) stats.byRole[role.id] = (stats.byRole[role.id] ?? 0) + 1;
+    body = reminded?.body ?? body;
 
     const upstreamModel = body.model;
     const sent = decision ? describeSent(decision, { applyEffort, model: upstreamModel, requested }) : null;
@@ -407,7 +435,7 @@ export function createProxy(config, deps = {}) {
         && upstream.status === 200 && isEventStream(upstream);
       const usage = await relay(res, upstream, { resumable, trail });
       if (sent) {
-        recordRouted({ sent, session, protocol, nudged: reminded != null, trail, usage, status: upstream.status });
+        recordRouted({ sent, session, protocol, nudged: reminded?.nudged === true, trail, usage, status: upstream.status });
         log.event?.({ type: 'completed', id: eventId, ts: new Date().toISOString(), status: upstream.status });
       }
     } catch (err) {
@@ -422,7 +450,7 @@ export function createProxy(config, deps = {}) {
       res.writeHead(200, { 'content-type': 'application/json' });
       return res.end(JSON.stringify({
         ok: true, ...identity, mode: config.mode, ...(config.mode === 'auto' ? { autoFallback: config.autoFallback } : {}),
-        model: config.model, ladder: config.ladder, decisionModel: config.decisionModel, stats,
+        model: config.model, ladder: config.ladder, decisionModel: config.decisionModel, roles: roles.length, stats,
       }));
     }
     const raw = await readBody(req);
@@ -455,5 +483,5 @@ export function createProxy(config, deps = {}) {
       }
     });
   });
-  return { server, stats, router };
+  return { server, stats, router, roles };
 }

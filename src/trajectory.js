@@ -124,7 +124,8 @@ export function outputFailed(output, command = '') {
  * }}
  */
 export function parseTurn(input) {
-  const items = Array.isArray(input) ? input : [];
+  // A bare string input is one user message.
+  const items = typeof input === 'string' ? [{ type: 'message', role: 'user', content: input }] : Array.isArray(input) ? input : [];
   const start = latestUserIndex(items);
   const userText = start >= 0 ? textOf(items[start].content) : '';
   const calls = new Map();
