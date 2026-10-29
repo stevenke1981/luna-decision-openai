@@ -131,7 +131,7 @@ test('a turn that stops on a promise is resumed once, and the client sees one st
     await until(() => h.logged.length === 1);
     assert.equal(h.logged[0].status, 200);
     assert.deepEqual(h.logged[0].continues, [{
-      n: 1, effort: 'medium', unfinished: 0.75, source: 'heuristic', reasons: ['promises more work'],
+      n: 1, kind: 'resume', effort: 'medium', unfinished: 0.75, source: 'heuristic', reasons: ['promises more work'], stalls: 0,
     }]);
     assert.equal(h.stats.continued, 1);
     assert.deepEqual(h.printed.filter((s) => s.startsWith('Luna  RESUME')).map((s) => s.split('\n')[0]), [
@@ -290,6 +290,7 @@ test('luna decides the stop: a low score releases a turn the heuristic would res
         cacheMode: 'explicit',
         organization: '',
         project: '',
+        verify: true,
       },
     }]);
   } finally {
@@ -314,7 +315,7 @@ test('a luna score above the threshold resumes with source luna', async () => {
     await until(() => h.logged.length === 1);
     assert.equal(h.seen.length, 2);
     assert.deepEqual(h.logged[0].continues, [{
-      n: 1, effort: 'medium', unfinished: 0.8, source: 'luna', reasons: ['luna unfinished 0.80'],
+      n: 1, kind: 'resume', effort: 'medium', unfinished: 0.8, source: 'luna', reasons: ['luna unfinished 0.80'], stalls: 0,
     }]);
   } finally {
     h.close();
@@ -467,6 +468,116 @@ test('formatContinue prints the resume line and a dim detail line', () => {
   assert.equal(bare.split('\n')[1], '     Step 1 · unfinished 0.75 · heuristic');
 });
 
+test('formatContinue names a review round and a no-progress streak', () => {
+  const review = stripAnsi(formatContinue({ n: 3, kind: 'review', effort: 'high', step: 9, unfinished: 0.1, source: 'heuristic', reasons: ['looks done'] }));
+  assert.equal(review, 'Luna  REVIEW #3 → HIGH  ✓ APPLIED\n     Step 9 · unfinished 0.10 · heuristic · looks done');
+  const stalled = stripAnsi(formatContinue({ n: 4, kind: 'resume', effort: 'max', step: 9, unfinished: 0.75, stalls: 2, source: 'heuristic', reasons: [] }));
+  assert.equal(stalled.split('\n')[1], '     Step 9 · unfinished 0.75 · 2 without progress · heuristic');
+  const first = stripAnsi(formatContinue({ n: 1, kind: 'resume', effort: 'high', step: 2, unfinished: 0.75, stalls: 0, source: 'heuristic', reasons: [] }));
+  assert.ok(!first.includes('without progress'));
+});
+
+const editStep = (callId, file = 'src/parser.js') => [
+  { type: 'custom_tool_call', name: 'apply_patch', call_id: callId, input: `*** Begin Patch\n*** Update File: ${file}\n@@\n-a\n+b\n*** End Patch` },
+  { type: 'custom_tool_call_output', call_id: callId, output: `Success. Updated the following files:\nM ${file}` },
+];
+const lastDeveloperText = (body) => body.input.at(-1).content[0].text;
+
+test('long task: resumes without progress stop at LUNA_MAX_STALLS although the total budget is left', async () => {
+  const rounds = [answer('r1', PROMISE), answer('r2', PROMISE), answer('r3', PROMISE), answer('r4', PROMISE)];
+  const h = await start({ env: { ...HEURISTIC, LUNA_MAX_STALLS: '1' }, replies: rounds.map(sse) });
+  try {
+    await (await post(h, request([user('fix the parser'), ...shellStep('k1')]))).text();
+    assert.equal(h.seen.length, 3, 'a resume, one more without progress, then the turn is let go');
+    assert.ok(!lastDeveloperText(h.seen[1].body).includes('without making progress'));
+    assert.match(lastDeveloperText(h.seen[2].body), /You stopped again without making progress\./);
+    await until(() => h.logged.length === 1);
+    assert.deepEqual(h.logged[0].continues.map((c) => c.stalls), [0, 1]);
+  } finally {
+    h.close();
+  }
+});
+
+test('long task: a client request after real progress starts a new no-progress streak', async () => {
+  // LUNA_MAX_STALLS=0: a turn is resumed only after it moved since the last resume.
+  const h = await start({ env: { ...HEURISTIC, LUNA_MAX_STALLS: '0' }, replies: [sse(answer('r1', PROMISE))] });
+  try {
+    const before = [user('fix the parser'), ...shellStep('k1')];
+    await (await post(h, request(before))).text();
+    assert.equal(h.seen.length, 2, 'first stop resumed, the stalled continuation is not');
+    // Rerunning a passing check is no progress.
+    await (await post(h, request([...before, ...shellStep('k2')]))).text();
+    assert.equal(h.seen.length, 3);
+    // A code edit that was checked is progress: resumed again.
+    const moved = [...before, ...shellStep('k2'), ...editStep('e1'), ...shellStep('k3')];
+    await (await post(h, request(moved))).text();
+    assert.equal(h.seen.length, 5);
+  } finally {
+    h.close();
+  }
+});
+
+test('long task: changed code that was never checked is resumed with a request to verify it', async () => {
+  // No resume without progress allowed: an agent that ignores the request is not asked again.
+  const h = await start({ env: { ...HEURISTIC, LUNA_REVIEW_ROUNDS: '0', LUNA_MAX_STALLS: '0' }, replies: [sse(answer('r1', DONE)), sse(answer('r2', DONE))] });
+  try {
+    await (await post(h, request([user('fix the parser'), ...editStep('e1')]))).text();
+    assert.equal(h.seen.length, 2);
+    const text = lastDeveloperText(h.seen[1].body);
+    assert.match(text, /\(changed code without verifying it\)/);
+    assert.match(text, /Verify your changes now/);
+  } finally {
+    h.close();
+  }
+});
+
+test('long task: a done turn with checked edits gets one self-review round, then ends', async () => {
+  const h = await start({ env: HEURISTIC, replies: [sse(answer('r1', DONE)), sse(answer('r2', 'Self-review found no issues.')), sse(answer('r3', DONE))] });
+  try {
+    await (await post(h, request([user('fix the parser'), ...editStep('e1'), ...shellStep('k1')]))).text();
+    assert.equal(h.seen.length, 2, 'one review round, not two');
+    assert.match(lastDeveloperText(h.seen[1].body), /^\[luna\] Self-review\. Before you finish/);
+    assert.equal(h.seen[1].body.reasoning.effort, 'medium');
+    await until(() => h.logged.length === 1);
+    assert.deepEqual(h.logged[0].continues.map((c) => [c.kind, c.n]), [['review', 1]]);
+    assert.equal(h.stats.reviewed, 1);
+    assert.equal(h.stats.continued, 1);
+  } finally {
+    h.close();
+  }
+});
+
+test('long task: no self-review when the agent asks the user, when rounds are 0, without edits, or for prose edits', async () => {
+  const cases = [
+    { env: HEURISTIC, input: [user('fix the parser'), ...editStep('e1'), ...shellStep('k1')], text: 'Please provide your API key.' },
+    { env: { ...HEURISTIC, LUNA_REVIEW_ROUNDS: '0' }, input: [user('fix the parser'), ...editStep('e1'), ...shellStep('k1')], text: DONE },
+    { env: HEURISTIC, input: [user('fix the parser'), ...shellStep('k1')], text: DONE },
+  ];
+  for (const c of cases) {
+    const h = await start({ env: c.env, replies: [sse(answer('r1', c.text)), sse(answer('r2', DONE))] });
+    try {
+      await (await post(h, request(c.input))).text();
+      assert.equal(h.seen.length, 1, `${JSON.stringify(c.env)} ${c.text}`);
+    } finally {
+      h.close();
+    }
+  }
+});
+
+test('long task: luna saying the agent needs the user blocks the self-review', async () => {
+  const h = await start({
+    env: LUNA_ON,
+    deps: { stopCheckFn: async () => ({ unfinished: 0.1, reasons: ['luna needs_user 0.90, in progress 0.10'], cost: null, needsUser: true }) },
+    replies: [sse(answer('r1', 'Which database should I target?')), sse(answer('r2', DONE))],
+  });
+  try {
+    await (await post(h, request([user('fix the parser'), ...editStep('e1'), ...shellStep('k1')]))).text();
+    assert.equal(h.seen.length, 1);
+  } finally {
+    h.close();
+  }
+});
+
 const PLAN_OPEN = [{ step: 'Write parser', status: 'completed' }, { step: 'Add tests', status: 'pending' }];
 const PLAN_DONE = [{ step: 'Write parser', status: 'completed' }, { step: 'Add tests', status: 'completed' }];
 
@@ -562,6 +673,62 @@ test('LUNA_MODE=off neither reminds nor resumes', async () => {
     assert.equal(reply, answer('r1', PROMISE).join(''));
     assert.deepEqual(h.seen[0].body, body, 'off leaves the request byte-identical');
     assert.equal(h.seen.length, 1);
+  } finally {
+    h.close();
+  }
+});
+
+test('long task: no self-review for a closing question or for prose-only edits', async () => {
+  const cases = [
+    { input: [user('fix the parser'), ...editStep('e1'), ...shellStep('k1')], text: 'Fixed.\nDo you want the cache to be per-user or global?' },
+    { input: [user('fix the docs'), ...editStep('e1', 'README.md')], text: DONE },
+    { input: [user('fix the docs'), ...editStep('e1', 'docs\\guide.md')], text: DONE },
+  ];
+  for (const c of cases) {
+    const h = await start({ env: HEURISTIC, replies: [sse(answer('r1', c.text)), sse(answer('r2', DONE))] });
+    try {
+      await (await post(h, request(c.input))).text();
+      assert.equal(h.seen.length, 1, c.text);
+    } finally {
+      h.close();
+    }
+  }
+});
+
+test('long task: the focus of a resume is repeated before the turn\'s next generations, then dropped', async () => {
+  const toolCall = { type: 'function_call', call_id: 'k9', name: 'shell', arguments: '{"command":["node","--test"]}', status: 'completed' };
+  const h = await start({
+    env: { ...HEURISTIC, LUNA_REVIEW_ROUNDS: '0' },
+    replies: [sse(answer('r1', PROMISE)), sse(answer('r2', 'Running the tests.', [messageItem('m2', 'Running the tests.'), toolCall])), sse(answer('r3', DONE))],
+  });
+  try {
+    const base = [user('fix the parser'), ...shellStep('k1')];
+    await (await post(h, request(base))).text();
+    assert.equal(h.seen.length, 2, 'resumed; the continuation calls a tool');
+    // The client runs the tool and comes back in the same turn: the resume's focus is repeated.
+    await (await post(h, request([...base, ...shellStep('k9')]))).text();
+    assert.match(lastDeveloperText(h.seen[2].body), /^\[luna\] You were resumed because the task was not finished\./);
+    // That generation ended the turn for good: the next turn gets no focus.
+    await (await post(h, request([...base, ...shellStep('k9'), user('thanks, now the lexer')]))).text();
+    assert.equal(h.seen[3].body.input.at(-1).role, 'user');
+  } finally {
+    h.close();
+  }
+});
+
+test('long task: a model-only session (no reasoning) still starts each turn with a fresh budget', async () => {
+  const replies = [PROMISE, DONE, DONE, PROMISE, DONE].map((text, i) => sse(answer(`r${i + 1}`, text)));
+  const h = await start({ env: { ...HEURISTIC, LUNA_MAX_CONTINUES: '1' }, replies });
+  try {
+    const plain = (input) => ({ ...request(input, { model: 'luna-auto' }), reasoning: undefined });
+    await (await post(h, plain([user('fix the parser'), ...shellStep('k1')]))).text();
+    assert.equal(h.seen.length, 2, 'first turn resumed once');
+    // A new turn opens with a request that has no step yet, as Codex sends it.
+    const next = [user('fix the parser'), ...shellStep('k1'), user('now the lexer')];
+    await (await post(h, plain(next))).text();
+    assert.equal(h.seen.length, 3);
+    await (await post(h, plain([...next, ...shellStep('k2')]))).text();
+    assert.equal(h.seen.length, 5, 'the new turn may be resumed again');
   } finally {
     h.close();
   }

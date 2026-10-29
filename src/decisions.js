@@ -469,11 +469,12 @@ function choiceProbability(answer, value) {
  * @param {object} turn the parsed turn (userText, steps)
  * @param {{total:number, done:number, open:string[]}|null} plan
  * @param {string} finalText the text of the generation that ended the turn
- * @param {{url:string, apiKey:string, model:string, timeoutMs:number, cacheMode?:string}} opts
- * @returns {Promise<{unfinished:number, reasons:string[], cost:number|null}>}
+ * @param {{url:string, apiKey:string, model:string, timeoutMs:number, cacheMode?:string, verify?:boolean}} opts
+ *   verify: the rules' verification check (unchecked or failing code) stands as well
+ * @returns {Promise<{unfinished:number, reasons:string[], cost:number|null, needsUser?:true}>}
  */
 export async function lunaStopCheck(turn, plan, finalText, opts) {
-  const rules = assessStop(turn, plan, finalText);
+  const rules = assessStop(turn, plan, finalText, { verify: opts.verify ?? true });
   if (HARD_STOP_REASONS.has(rules.reasons[0]) || plan?.open?.length > 0) return { ...rules, cost: null };
   const closing = closingOf(finalText);
   if (!closing) return { ...rules, cost: null };
@@ -488,7 +489,7 @@ export async function lunaStopCheck(turn, plan, finalText, opts) {
   const { cost } = callCost(body?.usage);
   const reasons = [`luna ${end.choice} ${top.toFixed(2)}, in progress ${inProgress.toFixed(2)}`];
   // A request for the user is a legitimate stop: only Luna's own "will continue" counts.
-  if (end.choice === 'needs_user') return { unfinished: continuing, reasons, cost };
+  if (end.choice === 'needs_user') return { unfinished: continuing, reasons, cost, needsUser: true };
   // A summary that lists finished items can read as "in progress"; when `end` is sure the
   // message says done, only the rules' own signals can still resume.
   const judged = end.choice === 'done' && top >= SURE_DONE ? continuing : Math.max(continuing, inProgress);

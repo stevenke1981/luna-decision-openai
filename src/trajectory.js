@@ -69,6 +69,29 @@ export function innerCommand(cmd) {
   return unwrapped.replace(/^(?:(?:cd|Set-Location|pushd)\s+\S+\s*(?:&&|;)\s*)+/i, '');
 }
 
+// apply_patch names each file it touches on a "*** Add/Update/Delete File: <path>" line, and
+// the new name of a moved file on "*** Move to: <path>". Paths may hold backslashes (Windows).
+const PATCH_FILE = /^\*\*\* (?:(?:Add|Update|Delete) File|Move to): ?(.+?)\s*$/gm;
+
+// Every string inside parsed arguments: the patch may sit in `input`, `patch` or a command array.
+function stringsOf(value, out = []) {
+  if (typeof value === 'string') out.push(value);
+  else if (Array.isArray(value)) value.forEach((v) => stringsOf(v, out));
+  else if (value && typeof value === 'object') Object.values(value).forEach((v) => stringsOf(v, out));
+  return out;
+}
+
+/** The files an edit call touches, as far as its arguments name them (may be empty). */
+export function editedFiles(call) {
+  const args = call.type === 'custom_tool_call' ? call.input
+    : call.type === 'local_shell_call' ? call.action?.command
+      : parseArgs(call.arguments);
+  const files = stringsOf(args).flatMap((text) => [...text.matchAll(PATCH_FILE)].map((m) => m[1]));
+  if (files.length > 0) return files;
+  const single = args?.path ?? args?.file_path ?? args?.filePath;
+  return typeof single === 'string' ? [single] : [];
+}
+
 export function classifyCall(call) {
   if (/apply_patch|write_file|edit/i.test(call.name ?? '')) return 'edit';
   const cmd = innerCommand(commandOf(call));
@@ -96,7 +119,7 @@ export function outputFailed(output, command = '') {
 /**
  * @returns {{
  *   userText: string,
- *   steps: Array<{kind: string, command: string, failed: boolean|null}>,
+ *   steps: Array<{kind: string, command: string, failed: boolean|null, files?: string[]}>,
  *   assistantMessages: number
  * }}
  */
@@ -112,6 +135,7 @@ export function parseTurn(input) {
     if (!it || typeof it !== 'object') continue;
     if (TOOL_CALL_TYPES.has(it.type)) {
       const step = { kind: classifyCall(it), command: commandOf(it), failed: null };
+      if (step.kind === 'edit') step.files = editedFiles(it);
       steps.push(step);
       if (it.call_id ?? it.id) calls.set(it.call_id ?? it.id, step);
     } else if (TOOL_OUTPUT_TYPES.has(it.type)) {

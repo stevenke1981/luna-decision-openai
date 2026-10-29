@@ -85,8 +85,18 @@ export function loadConfig(env = process.env) {
     // Long-task help: resume a turn the model ended before the work was done, and remind it
     // of an unfinished plan before each generation.
     continueTurns: switchEnv(env, 'LUNA_CONTINUE', 'on'),
-    maxContinues: intEnv(env, 'LUNA_MAX_CONTINUES', 5),
+    // Resumes per turn in all; a long task that keeps moving is resumed up to this many times.
+    maxContinues: intEnv(env, 'LUNA_MAX_CONTINUES', 20),
+    // Resumes in a row without progress (no new edit, plan step or newly passing check) after
+    // the last one that had some, so an agent that only talks is not resumed forever. 0: resume
+    // only after progress.
+    maxStalls: intEnv(env, 'LUNA_MAX_STALLS', 2),
     continueThreshold: probabilityEnv(env, 'LUNA_CONTINUE_THRESHOLD', 0.6),
+    // Changed code that was never checked, or whose tests still fail, is unfinished work.
+    verify: switchEnv(env, 'LUNA_VERIFY', 'on'),
+    // Self-review rounds per turn: after the agent says it is done with changed code, it is sent
+    // back once to review its own diff against the request and fix what it finds (0 turns it off).
+    reviewRounds: intEnv(env, 'LUNA_REVIEW_ROUNDS', 1),
     nudge: switchEnv(env, 'LUNA_NUDGE', 'on'),
     mode,
     // How the Codex profile authenticates the main model: the ChatGPT login, OPENAI_API_KEY or

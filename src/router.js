@@ -1,5 +1,6 @@
 // Per-session effort routing: trajectory -> assessment (luna gated by rules, heuristic or judge) -> hysteresis.
-// The session state also remembers how often this turn was resumed after an early stop.
+// The session state also remembers how this turn was resumed after early stops: how often in
+// all, how many times in a row without progress, and how many self-review rounds it had.
 import { parseTurn } from './trajectory.js';
 import { assess, nextState, isNewTurn } from './policy.js';
 import { judge } from './judge.js';
@@ -46,6 +47,14 @@ export function decisionOptions(config, apiKey) {
 }
 
 const MAX_SESSIONS = 500;
+// Resume bookkeeping that lives for one turn and survives the per-generation effort state.
+const TURN_FIELDS = ['continues', 'stalls', 'mark', 'reviews', 'reviewedEdits', 'focus'];
+
+function turnFields(prev) {
+  const out = {};
+  for (const k of TURN_FIELDS) if (prev?.[k] !== undefined) out[k] = prev[k];
+  return out;
+}
 
 export function createRouter(config, { judgeFn = judge, decideFn = lunaDecide } = {}) {
   const sessions = new Map();
@@ -104,12 +113,12 @@ export function createRouter(config, { judgeFn = judge, decideFn = lunaDecide } 
     const { a, source, cost, suggestions } = await assessTurn(body, judgeTarget, turn, step, auth.apiKey);
     const fresh = isNewTurn(prev, step);
     let state = nextState(prev, a, step);
-    const continues = fresh ? 0 : prev.continues ?? 0;
-    if (continues > 0 && state.level < defaultLevel) {
+    const kept = fresh ? { continues: 0 } : { continues: 0, ...turnFields(prev) };
+    if (kept.continues > 0 && state.level < defaultLevel) {
       // The model already tried to stop early this turn; low effort is where it gets lazy.
       state = { ...state, level: defaultLevel, reasons: [...state.reasons, 'resumed turn keeps default effort'] };
     }
-    remember(sessionKey, { ...state, continues });
+    remember(sessionKey, { ...state, ...kept });
     return {
       effort: ladder[state.level],
       from: state.from == null ? null : ladder[state.from],
@@ -130,17 +139,80 @@ export function createRouter(config, { judgeFn = judge, decideFn = lunaDecide } 
   }
 
   /**
+   * Notes a generation of a session that is not routed (only its model is set), so a new turn
+   * still resets the resume bookkeeping of the last one.
+   * @param {number} step 1-based generation index within the turn
+   */
+  function observe(sessionKey, step) {
+    const prev = sessions.get(sessionKey);
+    if (isNewTurn(prev, step)) remember(sessionKey, { level: defaultLevel, hold: 0, step, from: null, reasons: [], continues: 0 });
+    else remember(sessionKey, { ...prev, step });
+  }
+
+  // Resumes without progress before this one, if the turn were resumed now at progress `mark`:
+  // 0 when the turn moved since the last resume (or was never resumed).
+  function stallsAt(prev, mark) {
+    return mark != null && prev?.mark === mark ? (prev.stalls ?? 0) + 1 : 0;
+  }
+
+  /**
+   * Whether the current turn may be resumed once more: under LUNA_MAX_CONTINUES in all, and at
+   * most LUNA_MAX_STALLS resumes in a row without progress after the last one that had some.
+   * @param {string} [mark] the turn's progress (longtask progressOf); omitted, only the total counts
+   */
+  function canResume(sessionKey, mark) {
+    const prev = sessions.get(sessionKey);
+    if ((prev?.continues ?? 0) >= config.maxContinues) return false;
+    return mark == null || stallsAt(prev, mark) <= (config.maxStalls ?? Infinity);
+  }
+
+  /**
+   * Whether the current turn is due a self-review round: rounds are left, the total budget is
+   * not spent, and code changed since the last review (or since the turn began).
+   * @param {number} edits edits in the turn so far
+   */
+  function canReview(sessionKey, edits) {
+    const prev = sessions.get(sessionKey);
+    if ((prev?.continues ?? 0) >= config.maxContinues) return false;
+    if ((prev?.reviews ?? 0) >= (config.reviewRounds ?? 0)) return false;
+    return edits > (prev?.reviewedEdits ?? 0);
+  }
+
+  /**
    * Records that the proxy resumed the current turn, and returns the effort for the
    * resumed generation: one rung above the last one, at least the default.
-   * @returns {{continues:number, effort:string}}
+   * @param {{mark?:string, review?:boolean, edits?:number, focus?:string|null}} [resume] mark: the
+   *   turn's progress; review: this resume is a self-review round over `edits` edits; focus: the
+   *   reminder repeated before the turn's next generations (see focusOf)
+   * @returns {{continues:number, effort:string, stalls:number, reviews:number}}
    */
-  function noteContinue(sessionKey) {
+  function noteContinue(sessionKey, { mark, review = false, edits = 0, focus = null } = {}) {
     const prev = sessions.get(sessionKey) ?? { level: defaultLevel, hold: 0, step: 1, continues: 0 };
     const level = Math.min(ladder.length - 1, Math.max(defaultLevel, prev.level + 1));
     const continues = (prev.continues ?? 0) + 1;
-    remember(sessionKey, { ...prev, level, continues });
-    return { continues, effort: ladder[level] };
+    // A review is progress-driven (it needs new edits), so it starts a fresh streak.
+    const stalls = review ? 0 : stallsAt(prev, mark);
+    const reviews = (prev.reviews ?? 0) + (review ? 1 : 0);
+    const next = { ...prev, level, continues, stalls, mark, reviews, focus };
+    if (review) next.reviewedEdits = edits;
+    remember(sessionKey, next);
+    return { continues, effort: ladder[level], stalls, reviews };
   }
 
-  return { route, continuesOf, noteContinue, sessions };
+  /**
+   * The reminder of the last resume, while the turn it belongs to goes on. A resume instruction
+   * reaches only the generation it was sent with (the client keeps no copy), so the proxy
+   * repeats a short form of it before the turn's later generations.
+   */
+  function focusOf(sessionKey) {
+    return sessions.get(sessionKey)?.focus ?? null;
+  }
+
+  /** Drops the reminder once the turn has ended for good. */
+  function clearFocus(sessionKey) {
+    const prev = sessions.get(sessionKey);
+    if (prev?.focus) remember(sessionKey, { ...prev, focus: null });
+  }
+
+  return { route, observe, continuesOf, canResume, canReview, noteContinue, focusOf, clearFocus, sessions };
 }

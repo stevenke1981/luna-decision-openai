@@ -234,7 +234,7 @@ test('stats groups decisions by effort in ladder order and counts resumed early 
   try {
     const res = await run(['stats'], { ...process.env, LUNA_HOME: home });
     assert.equal(res.code, 0, res.out);
-    assert.match(res.out, /^5 generations, 4 sessions, 1 routed by Luna, 3 early stops resumed/);
+    assert.match(res.out, /^5 generations, 4 sessions, 1 routed by Luna, 3 early stops resumed\r?\n/);
     assert.match(res.out, /low\s+2 gens\s+0 avg reasoning tok\s+30 output tok/);
     assert.match(res.out, /xhigh\s+1 gens\s+50 avg reasoning tok\s+100 output tok/);
     assert.match(res.out, /\n {2}-\s+1 gens/);
@@ -242,6 +242,19 @@ test('stats groups decisions by effort in ladder order and counts resumed early 
     const order = ['  low', '  medium', '  xhigh', '  -'].map((s) => res.out.indexOf(s));
     assert.ok(order.every((i) => i > 0), res.out);
     assert.deepEqual([...order].sort((a, b) => a - b), order);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('stats counts self-review rounds apart from resumed early stops', async () => {
+  const home = tempDir();
+  const rows = [{ effort: 'medium', session: 'a', continues: [{ kind: 'resume', effort: 'high' }, { kind: 'review', effort: 'high' }] }];
+  fs.writeFileSync(path.join(home, 'decisions.jsonl'), rows.map((r) => JSON.stringify(r)).join('\n') + '\n');
+  try {
+    const res = await run(['stats'], { ...process.env, LUNA_HOME: home });
+    assert.equal(res.code, 0, res.out);
+    assert.match(res.out, /^1 generations, 1 sessions, 0 routed by Luna, 1 early stops resumed, 1 self-review rounds\r?\n/);
   } finally {
     fs.rmSync(home, { recursive: true, force: true });
   }
@@ -255,7 +268,7 @@ test('help names the luna-decision-openai commands, the variables and the port',
     assert.match(res.out, /luna-decision-openai serve/);
     assert.match(res.out, /codex -p luna-decision/);
     for (const name of ['LUNA_MODEL (gpt-6.1-terra)', 'LUNA_DEFAULT_EFFORT (medium)', 'LUNA_CONTINUE (on|off)',
-      'LUNA_MAX_CONTINUES (5)', 'LUNA_NUDGE (on|off)', 'LUNA_PORT (8791)']) {
+      'LUNA_MAX_CONTINUES (20)', 'LUNA_MAX_STALLS (2)', 'LUNA_VERIFY (on|off)', 'LUNA_REVIEW_ROUNDS (1)', 'LUNA_NUDGE (on|off)', 'LUNA_PORT (8791)']) {
       assert.ok(res.out.includes(name), `help is missing ${name}`);
     }
     assert.match(res.out, /http:\/\/127\.0\.0\.1:8791\/v1, model luna-auto/);

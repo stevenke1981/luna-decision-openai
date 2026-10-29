@@ -413,7 +413,7 @@ test('lunaStopCheck: the hard rules settle the stop without a call', async () =>
   );
   assert.deepEqual(
     await lunaStopCheck(turn, null, 'Please provide your API key.', OPTS),
-    { unfinished: 0.1, reasons: ['needs the user'], cost: null },
+    { unfinished: 0.1, reasons: ['needs the user'], needsUser: true, cost: null },
   );
   const plan = { total: 3, done: 1, open: ['write tests', 'update docs'] };
   assert.deepEqual(

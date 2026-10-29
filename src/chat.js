@@ -1,7 +1,7 @@
 // Chat Completions support: turns `messages` (as sent by opencode, aider, crush…)
 // into the same turn shape as trajectory.parseTurn, and rewrites the effort field.
 import crypto from 'node:crypto';
-import { classifyCall, outputFailed, textOf, isSyntheticUserText } from './trajectory.js';
+import { classifyCall, editedFiles, outputFailed, textOf, isSyntheticUserText } from './trajectory.js';
 
 function chatText(content) {
   if (typeof content === 'string') return content;
@@ -30,6 +30,7 @@ export function parseChatTurn(messages) {
       for (const tc of toolCalls) {
         const call = { type: 'function_call', name: tc?.function?.name, arguments: tc?.function?.arguments };
         const step = { kind: classifyCall(call), command: commandOfChat(call), failed: null };
+        if (step.kind === 'edit') step.files = editedFiles(call);
         steps.push(step);
         if (tc?.id) calls.set(tc.id, step);
       }

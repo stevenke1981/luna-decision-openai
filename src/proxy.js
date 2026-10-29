@@ -2,7 +2,8 @@
 // effort, so the prompt prefix (and therefore prompt caching) is untouched.
 // A routed `luna-auto` request also gets its model rewritten to the one configured model.
 // Long-task help: a routed request whose plan has open steps gets a reminder at its end,
-// and a Responses turn the model ended early is resumed on the same stream (splice.js).
+// and a Responses turn the model ended early is resumed on the same stream (splice.js):
+// to finish the work, to check changed code, or for a self-review round once it says done.
 import http from 'node:http';
 import { randomUUID } from 'node:crypto';
 import zlib from 'node:zlib';
@@ -11,7 +12,9 @@ import { parseTurn } from './trajectory.js';
 import { parseChatTurn, chatWantsReasoning, applyChatEffort, chatSessionKey } from './chat.js';
 import { createDecisionLog, formatDecision, formatContinue, usageTokens } from './log.js';
 import { wantsModelRouting, modelId, clampEffort } from './model.js';
-import { turnPlan, finalOutput, assessStop, nudgeText, continueText } from './longtask.js';
+import {
+  turnPlan, finalOutput, assessStop, asksUser, nudgeText, continueText, reviewText, focusText, progressOf,
+} from './longtask.js';
 import { lunaStopCheck } from './decisions.js';
 import {
   continuationBody, developerMessage, forwardHeaders, isEventStream, pipeWithContinuation, writeChunk, writeUpstreamHead,
@@ -187,12 +190,12 @@ function describeSent(decision, { applyEffort, model, requested }) {
   };
 }
 
-// The copy of a request that carries the plan reminder at its end, or null when the plan
-// has no open step (a finished or missing plan gets no reminder).
-function withPlanReminder(protocol, body) {
+// The copy of a request that carries the reminders at its end (the plan's open steps, and the
+// focus of the turn's last resume), or null when there is nothing to remind.
+function withReminder(protocol, body, focus) {
   const plan = turnPlan(body);
-  if (!plan || plan.open.length === 0) return null;
-  return protocol.remind(body, nudgeText(plan));
+  const texts = [...(plan?.open.length > 0 ? [nudgeText(plan)] : []), ...(focus ? [focus] : [])];
+  return texts.length > 0 ? protocol.remind(body, texts.join('\n\n')) : null;
 }
 
 // The error text for a stop-check fallback: one line, at most MAX_FAILURE_NOTE characters.
@@ -207,15 +210,19 @@ export function createProxy(config, deps = {}) {
   const print = deps.print ?? ((s) => process.stdout.write(`${s}\n`));
   const openRouterOf = deps.isOpenRouter ?? isOpenRouter;
   const stopCheckFn = deps.stopCheckFn ?? lunaStopCheck;
-  const stats = { requests: 0, routed: 0, byEffort: {}, reasoningTokens: {}, continued: 0, nudged: 0 };
+  const stats = { requests: 0, routed: 0, byEffort: {}, reasoningTokens: {}, continued: 0, reviewed: 0, nudged: 0 };
   const identity = { app: APP, version: VERSION, build: BUILD, pid: process.pid, startedAt: new Date().toISOString(), eventStream: true };
 
   // Effort for this generation, or null when the request is left alone.
   async function decide(body, turn, { session, judgeTarget, applyEffort, routeModel, apiKey }) {
     if (config.mode === 'off') return routeModel ? OFF_DECISION : null;
     if (!applyEffort && !routeModel) return null;
-    // Only the model is rewritten, so asking Luna would cost a call whose answer goes unused.
-    if (!applyEffort) return MODEL_ONLY_DECISION;
+    // Only the model is rewritten, so asking Luna would cost a call whose answer goes unused;
+    // the session still learns where the turn stands, so a new turn resets the resume budget.
+    if (!applyEffort) {
+      router.observe(session, turn.steps.length + 1);
+      return MODEL_ONLY_DECISION;
+    }
     return router.route(body, session, judgeTarget, turn, { apiKey });
   }
 
@@ -234,17 +241,28 @@ export function createProxy(config, deps = {}) {
   // How unfinished a generation that ended the turn looks. luna judges it in luna mode, gated
   // by the stop rules; when luna fails, the rules decide alone, and `source` says which did.
   async function stopCheck(turn, plan, text, apiKey) {
-    if (config.mode !== 'luna') return { ...assessStop(turn, plan, text), source: 'heuristic' };
+    const rules = { verify: config.verify };
+    if (config.mode !== 'luna') return { ...assessStop(turn, plan, text, rules), source: 'heuristic' };
     try {
-      const judged = await stopCheckFn(turn, plan, text, decisionOptions(config, apiKey));
+      const judged = await stopCheckFn(turn, plan, text, { ...decisionOptions(config, apiKey), ...rules });
       return { ...judged, source: 'luna' };
     } catch (err) {
-      return { ...assessStop(turn, plan, text), source: `heuristic (luna failed: ${failureNote(err)})` };
+      return { ...assessStop(turn, plan, text, rules), source: `heuristic (luna failed: ${failureNote(err)})` };
     }
   }
 
-  // Resumes a turn the model ended before the work was done. Returns the continuation
-  // Response whose events replace the held completed event, or null to release that event.
+  // What to do with a turn the model ended: resume it (work remains), send it into a
+  // self-review round (it says done after changing code), or nothing. A stop that waits for
+  // the user (a request or a closing question) gets no review.
+  function nextMove(session, stop, progress, text) {
+    if (stop.unfinished >= config.continueThreshold) return router.canResume(session, progress.mark) ? 'resume' : null;
+    if (stop.needsUser || asksUser(text)) return null;
+    return router.canReview(session, progress.edits) ? 'review' : null;
+  }
+
+  // Resumes a turn the model ended before the work was done, or sends it into a self-review
+  // round. Returns the continuation Response whose events replace the held completed event,
+  // or null to release that event.
   async function resumeTurn(trail, data) {
     const response = data?.response;
     if (!response) return null;
@@ -253,14 +271,25 @@ export function createProxy(config, deps = {}) {
     const plan = turnPlan(trail.body);
     const turn = parseTurn(trail.body.input);
     if (turn.steps.length === 0 && plan == null) return null;
-    if (router.continuesOf(trail.session) >= config.maxContinues) return null;
+    const progress = progressOf(turn, plan);
+    // Neither move is possible: skip the stop check (and its Luna call).
+    if (!router.canResume(trail.session, progress.mark) && !router.canReview(trail.session, progress.edits)) return null;
     const stop = await stopCheck(turn, plan, text, trail.apiKey);
-    if (stop.unfinished < config.continueThreshold) return null;
-    // Another stream of this session may have taken the last slot while the stop check ran.
-    if (router.continuesOf(trail.session) >= config.maxContinues) return null;
+    // Checked after the stop check: another stream of this session may have taken the last slot meanwhile.
+    const kind = nextMove(trail.session, stop, progress, text);
+    if (!kind) {
+      router.clearFocus(trail.session);
+      return null;
+    }
 
-    const { continues, effort } = router.noteContinue(trail.session);
-    const body = continuationBody(trail.body, response.output, continueText(plan, stop.reasons), clampEffort(effort));
+    const review = kind === 'review';
+    const { continues, effort, stalls, reviews } = router.noteContinue(trail.session, {
+      mark: progress.mark, review, edits: progress.edits, focus: focusText(kind),
+    });
+    const instruction = review
+      ? reviewText(reviews, config.reviewRounds)
+      : continueText(plan, stop.reasons, { steps: turn.steps, stalls, verify: config.verify });
+    const body = continuationBody(trail.body, response.output, instruction, clampEffort(effort));
     const next = await fetch(trail.url, {
       method: 'POST', headers: trail.headers, body: JSON.stringify(body), signal: trail.signal,
     });
@@ -269,9 +298,13 @@ export function createProxy(config, deps = {}) {
       return next;
     }
     trail.body = body;
-    const resume = { n: continues, effort, unfinished: stop.unfinished, source: stop.source, reasons: stop.reasons };
+    const resume = {
+      n: continues, kind, effort, unfinished: stop.unfinished, source: stop.source, reasons: stop.reasons,
+      ...(review ? {} : { stalls }),
+    };
     trail.resumes.push(resume);
     stats.continued++;
+    if (review) stats.reviewed++;
     if (!config.quiet) print(formatContinue({ ...resume, step: turn.steps.length + 1 }));
     return next;
   }
@@ -349,7 +382,9 @@ export function createProxy(config, deps = {}) {
     const apiKey = decisionKeyFor(config, req.headers);
     const decision = await decide(body, turn, { session, judgeTarget, applyEffort, routeModel, apiKey });
     if (decision) body = rewriteRequest(protocol, body, decision, { applyEffort, inject, openRouter, routeModel });
-    const reminded = decision && config.nudge && config.mode !== 'off' ? withPlanReminder(protocol, body) : null;
+    // The focus of a resume only matters where resumes happen (streamed Responses).
+    const focus = protocol === PROTOCOLS.responses && config.continueTurns ? router.focusOf(session) : null;
+    const reminded = decision && config.nudge && config.mode !== 'off' ? withReminder(protocol, body, focus) : null;
     if (reminded) stats.nudged++;
     body = reminded ?? body;
 

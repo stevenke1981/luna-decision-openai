@@ -23,10 +23,13 @@ export function formatDecision(d) {
     + `${C.dim}     ${detail.join(' · ')}${C.reset}`;
 }
 
-// The resume line: "Luna  RESUME #2 → HIGH  ✓ APPLIED", then the step, unfinished score and reasons.
+// The resume line: "Luna  RESUME #2 → HIGH  ✓ APPLIED" ("REVIEW #3" for a self-review round),
+// then the step, unfinished score, no-progress streak and reasons.
 export function formatContinue(c) {
-  const detail = [`Step ${c.step}`, `unfinished ${c.unfinished.toFixed(2)}`, c.source, (c.reasons ?? []).join('; ')];
-  return `${C.blue}Luna${C.reset}  ${C.bold}RESUME #${c.n} → ${c.effort.toUpperCase()}${C.reset}  ${C.green}✓ APPLIED${C.reset}\n`
+  const what = c.kind === 'review' ? 'REVIEW' : 'RESUME';
+  const detail = [`Step ${c.step}`, `unfinished ${c.unfinished.toFixed(2)}`, ...(c.stalls > 0 ? [`${c.stalls} without progress`] : []),
+    c.source, (c.reasons ?? []).join('; ')];
+  return `${C.blue}Luna${C.reset}  ${C.bold}${what} #${c.n} → ${c.effort.toUpperCase()}${C.reset}  ${C.green}✓ APPLIED${C.reset}\n`
     + `${C.dim}     ${detail.filter(Boolean).join(' · ')}${C.reset}`;
 }
 

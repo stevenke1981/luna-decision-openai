@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { turnPlan, finalOutput, assessStop, nudgeText, continueText } from '../src/longtask.js';
+import {
+  turnPlan, finalOutput, assessStop, asksUser, nudgeText, continueText, reviewText, focusText, verification, progressOf,
+} from '../src/longtask.js';
 
 const user = (text) => ({ type: 'message', role: 'user', content: [{ type: 'input_text', text }] });
 const env = user('<environment_context><cwd>/repo</cwd></environment_context>');
@@ -142,7 +144,8 @@ test('finalOutput: only server-finished item types end the turn, alone or mixed'
 });
 
 const turn = (steps = []) => ({ userText: 'task', steps });
-const ok = { kind: 'edit', command: 'apply_patch', failed: false };
+// A passing step that leaves no unchecked edit behind, so only the text rules decide.
+const ok = { kind: 'verify', command: 'npm test', failed: false };
 const bad = { kind: 'verify', command: 'npm test', failed: true };
 const open = { total: 3, done: 1, open: ['write tests'] };
 const doneAll = { total: 2, done: 2, open: [] };
@@ -176,7 +179,7 @@ test('assessStop: asking for user input is 0.1 in English and Chinese, even with
     '請選擇哪個選項',
   ];
   for (const text of cases) {
-    assert.deepEqual(assessStop(turn([ok]), open, text), { unfinished: 0.1, reasons: ['needs the user'] }, text);
+    assert.deepEqual(assessStop(turn([ok]), open, text), { unfinished: 0.1, reasons: ['needs the user'], needsUser: true }, text);
   }
 });
 
@@ -335,7 +338,7 @@ test('continueText: caps the listed open steps at five', () => {
 });
 
 test('assessStop: a work verb promised in the first person counts, an offer does not', () => {
-  const edited = turn([{ kind: 'edit', command: 'apply_patch', failed: false }]);
+  const edited = turn([{ kind: 'edit', command: 'apply_patch', failed: false }, ok]);
   for (const text of [
     'The API handlers still use the old names; I will fix those and rerun the suite.',
     "Schema updated. I'll update the handlers next.",
@@ -365,4 +368,144 @@ test('assessStop: a long run of text with no sentence end stays fast', () => {
   assessStop(edited, null, '如果你需要' + '我會 '.repeat(100_000));
   assessStop(edited, null, 'if you want ' + 'I will fix '.repeat(40_000));
   assert.ok(performance.now() - start < 1000, `took ${Math.round(performance.now() - start)} ms`);
+});
+
+const edit = (files = ['src/a.js']) => ({ kind: 'edit', command: 'apply_patch', failed: false, files });
+const pass = { kind: 'verify', command: 'npm test', failed: false };
+const ranOk = { kind: 'exec', command: 'node app.js', failed: false };
+
+test('verification: none, unverified, verified (test or any passing command) and failing', () => {
+  assert.equal(verification([]), 'none');
+  assert.equal(verification([ok]), 'none');
+  assert.equal(verification([edit()]), 'unverified');
+  assert.equal(verification([pass, edit()]), 'unverified');
+  assert.equal(verification([edit(), { kind: 'read', command: 'cat a', failed: false }]), 'unverified');
+  assert.equal(verification([edit(), pass]), 'verified');
+  assert.equal(verification([edit(), ranOk]), 'verified');
+  assert.equal(verification([edit(), bad]), 'failing');
+  // A later passing run of the tests clears the failure; another command does not.
+  assert.equal(verification([edit(), bad, pass]), 'verified');
+  assert.equal(verification([edit(), bad, ranOk]), 'failing');
+  // A still-running check neither passes nor fails.
+  assert.equal(verification([edit(), { ...pass, failed: null }]), 'unverified');
+});
+
+test('verification: edits that touch only prose need no check', () => {
+  assert.equal(verification([edit(['README.md', 'docs/guide.mdx', 'LICENSE'])]), 'none');
+  assert.equal(verification([edit(['README.md', 'src/a.js'])]), 'unverified');
+  // An edit whose files are unknown counts as code.
+  assert.equal(verification([edit([])]), 'unverified');
+  assert.equal(verification([edit(), pass, edit(['CHANGELOG.md'])]), 'verified');
+});
+
+test('assessStop: changed code left unchecked is 0.65, failing tests after the edit are 0.7', () => {
+  assert.deepEqual(assessStop(turn([edit()]), null, 'Done.'), { unfinished: 0.65, reasons: ['changed code without verifying it'] });
+  assert.deepEqual(assessStop(turn([edit(), bad]), null, 'Done.'), { unfinished: 0.7, reasons: ['tests or build still fail after the last edit'] });
+  assert.deepEqual(assessStop(turn([edit(), pass]), null, 'Done.'), { unfinished: 0.1, reasons: ['looks done'] });
+  assert.deepEqual(assessStop(turn([edit(['README.md'])]), null, 'Done.'), { unfinished: 0.1, reasons: ['looks done'] });
+  // The text rules and an open plan still come first.
+  assert.equal(assessStop(turn([edit()]), null, 'Please provide your API key.').unfinished, 0.1);
+  assert.equal(assessStop(turn([edit()]), open, 'Done.').unfinished, 0.9);
+  assert.equal(assessStop(turn([edit()]), null, 'Next I will add tests.').unfinished, 0.75);
+});
+
+test('assessStop: verify off keeps the text-only rules', () => {
+  assert.deepEqual(assessStop(turn([edit()]), null, 'Done.', { verify: false }), { unfinished: 0.1, reasons: ['looks done'] });
+  assert.deepEqual(assessStop(turn([edit(), bad]), null, 'Done.', { verify: false }), { unfinished: 0.5, reasons: ['ended on a failing step'] });
+});
+
+test('progressOf: the mark moves with edits, plan steps done and the code getting checked, not with reruns', () => {
+  const base = progressOf(turn([edit(), bad]), open);
+  assert.deepEqual(base, { mark: '1/0/1/failing', edits: 1 });
+  const same = (steps, plan = open) => assert.equal(progressOf(turn(steps), plan).mark, base.mark, JSON.stringify(steps));
+  const moved = (steps, plan = open) => assert.notEqual(progressOf(turn(steps), plan).mark, base.mark, JSON.stringify(steps));
+  same([edit(), bad, { kind: 'read', command: 'cat a', failed: false }, bad]);
+  same([edit(), bad, { kind: 'exec', command: 'git commit -m x', failed: false }]);
+  same([edit(), bad, { ...edit(), failed: true }]);
+  moved([edit(), bad, edit()]);
+  moved([edit(), bad, pass]);
+  moved([edit(), bad, edit(['README.md'])]);
+  moved([edit(), bad], { ...open, done: 2 });
+  // Once the code passes, rerunning the tests is no progress.
+  assert.equal(progressOf(turn([edit(), pass, pass, pass]), null).mark, progressOf(turn([edit(), pass]), null).mark);
+  assert.deepEqual(progressOf(turn([edit(['README.md']), { ...edit(), failed: true }]), null), { mark: '0/1/0/none', edits: 0 });
+  assert.deepEqual(progressOf(null, null), { mark: '0/0/0/none', edits: 0 });
+});
+
+test('verification: version control, file moves and installs are not checks; a rejected patch is no edit', () => {
+  for (const command of ['git commit -am fix', 'bash -lc "mkdir -p out"', 'npm install', 'pip install -r requirements.txt', 'mv a b']) {
+    assert.equal(verification([edit(), { kind: 'exec', command, failed: false }]), 'unverified', command);
+  }
+  assert.equal(verification([{ ...edit(), failed: true }]), 'none');
+  assert.equal(verification([edit(['requirements.txt'])]), 'unverified');
+  assert.equal(verification([edit(['CMakeLists.txt'])]), 'unverified');
+});
+
+test('asksUser: a closing whose last line ends on a question mark', () => {
+  for (const text of ['Done.\nWhich approach do you prefer, A or B?', 'Should I also update the docs?  ', '要用哪個埠？', 'Ready. **Proceed?**']) {
+    assert.equal(asksUser(text), true, text);
+  }
+  for (const text of ['Fixed? Yes: all tests pass.', 'Done.', '', 'Why did it fail? The cache key was stale.\nFixed it.']) {
+    assert.equal(asksUser(text), false, text);
+  }
+});
+
+test('continueText: verify off drops the request to check', () => {
+  assert.ok(!continueText(null, ['promises more work'], { steps: [edit()], verify: false }).includes('Verify your changes now'));
+});
+
+test('focusText: a short reminder for resumed and review rounds', () => {
+  assert.match(focusText('resume'), /^\[luna\] You were resumed because the task was not finished\./);
+  assert.match(focusText('review'), /^\[luna\] You are in a self-review round/);
+});
+
+test('editedFiles: Windows paths, moves, JSON-encoded arguments and local shell calls', async () => {
+  const { editedFiles } = await import('../src/trajectory.js');
+  const patch = '*** Begin Patch\r\n*** Update File: docs\\guide.md\r\n*** Move to: src\\x.js\n@@\n-a\n+b\n*** Add File: README.md\n+c\n*** End Patch';
+  const files = ['docs\\guide.md', 'src\\x.js', 'README.md'];
+  assert.deepEqual(editedFiles({ type: 'custom_tool_call', name: 'apply_patch', input: patch }), files);
+  assert.deepEqual(editedFiles({ type: 'function_call', name: 'shell', arguments: JSON.stringify({ command: ['apply_patch', patch] }) }), files);
+  assert.deepEqual(editedFiles({ type: 'function_call', name: 'apply_patch', arguments: JSON.stringify({ input: patch }) }), files);
+  assert.deepEqual(editedFiles({ type: 'local_shell_call', action: { command: ['apply_patch', patch] } }), files);
+  assert.deepEqual(editedFiles({ type: 'function_call', name: 'write_file', arguments: JSON.stringify({ path: 'a/b.py' }) }), ['a/b.py']);
+  assert.deepEqual(editedFiles({ type: 'function_call', name: 'edit', arguments: '{bad json' }), []);
+  // A file renamed into code is a code edit.
+  assert.equal(verification([edit(['README.md', 'src\\x.js'])]), 'unverified');
+});
+
+test('continueText: quotes a failing last step, asks for a check and warns on a stall', () => {
+  const failing = continueText(null, ['tests or build still fail after the last edit'], { steps: [edit(), { ...bad, command: 'npm   test\n --silent' }], stalls: 2 });
+  assert.match(failing, /The last step failed: `npm test --silent`\. Find the root cause before you try again/);
+  assert.match(failing, /Verify your changes now: run the project's tests, build or linter/);
+  assert.match(failing, /You stopped again without making progress\./);
+  assert.match(failing, /Continue now:[^\n]*$/);
+  const unchecked = continueText(null, ['changed code without verifying it'], { steps: [edit()] });
+  assert.match(unchecked, /Verify your changes now/);
+  assert.ok(!unchecked.includes('The last step failed'));
+  assert.ok(!unchecked.includes('without making progress'));
+  const long = continueText(null, ['x'], { steps: [{ ...bad, command: 'z'.repeat(500) }] });
+  assert.ok(long.includes(`\`${'z'.repeat(160)}…\``));
+  // Without context the message is as before.
+  assert.ok(!continueText(null, ['x']).includes('Verify your changes now'));
+});
+
+test('reviewText: one round or numbered rounds, with the review checklist', () => {
+  const one = reviewText(1, 1);
+  assert.match(one, /^\[luna\] Self-review\. Before you finish, review your own work:\n1\. Re-read the original request/);
+  assert.match(one, /git diff/);
+  assert.match(one, /Fix every problem you find and verify again\. If you find nothing to fix, end your turn/);
+  assert.match(reviewText(2, 3), /^\[luna\] Self-review 2 of 3\./);
+});
+
+test('parseTurn: an edit step lists the files its patch names', async () => {
+  const { parseTurn } = await import('../src/trajectory.js');
+  const patch = '*** Begin Patch\n*** Update File: src/a.js\n@@\n-x\n+y\n*** Add File: docs/b.md\n+z\n*** End Patch';
+  const t = parseTurn([
+    user('fix it'),
+    { type: 'custom_tool_call', name: 'apply_patch', call_id: 'e1', input: patch },
+    { type: 'custom_tool_call_output', call_id: 'e1', output: 'Success' },
+    { type: 'function_call', name: 'shell', call_id: 'e2', arguments: JSON.stringify({ command: ['apply_patch', patch] }) },
+    { type: 'function_call', name: 'shell', call_id: 'e3', arguments: JSON.stringify({ command: ['ls'] }) },
+  ]);
+  assert.deepEqual(t.steps.map((s) => s.files), [['src/a.js', 'docs/b.md'], ['src/a.js', 'docs/b.md'], undefined]);
 });
