@@ -159,7 +159,7 @@ turn 中：
 
 ## 長任務協助：不讓 GPT-6.1 Terra 亂停
 
-主模型在長任務中常提早結束 turn：寫一段摘要、說「接下來我會…」、或問「要我繼續嗎？」，但工作其實沒做完。本專案有兩個機制處理這件事。
+主模型在長任務中常提早結束 turn：寫一段摘要、說「接下來我會…」、或問「要我繼續嗎？」，但工作其實沒做完；或改了程式卻沒跑測試就說完成。本專案有四個機制處理這件事：計畫提醒、提早收工自動續跑、驗證關卡、自我審查。後三者在同一條串流內接續，Codex 只看到一個持續工作的 turn。
 
 ### 1. 計畫提醒（nudge，`LUNA_NUDGE=on`）
 
@@ -173,10 +173,32 @@ proxy 會暫扣上游的 `response.completed`。若同時符合以下條件，�
 
 - 這一代沒有需要客戶端執行的工具呼叫（即要把控制權交還使用者）；
 - 本輪做過事，或有計畫；
-- 本輪續跑次數未達 `LUNA_MAX_CONTINUES`（預設 5）；
+- 本輪續跑總次數未達 `LUNA_MAX_CONTINUES`（預設 20）；
+- 自上次有進展的續跑以來，「無進展」的續跑未超過 `LUNA_MAX_STALLS`（預設 2，見下）；
 - `unfinished` ≥ `LUNA_CONTINUE_THRESHOLD`（預設 0.6）。
 
 續跑的那一代 effort 提高一級（至少為預設值）。
+
+**進展與停滯**：每次續跑時記下本輪的進展標記（`progressOf`：成功套用的程式編輯數、文件編輯數、計畫完成步數、程式的驗證狀態）。重跑已通過的測試、`git commit`、被拒的 patch 都不改變標記。下次續跑時標記沒變，就算一次「無進展」；標記一變就歸零。因此持續在做事的長任務可以一路續跑到總上限，只會說話不動手的 agent 在第 1 次續跑之後最多再被接回 `LUNA_MAX_STALLS` 次（`0`：只在有進展後才續跑）。無進展的續跑，提醒會加上「你又停了而且沒有進展，現在就用工具做下一步；真的卡住就明說需要使用者提供什麼」。
+
+**焦點提醒**：續跑或審查的 `[luna]` 指令只隨那一代送出，客戶端不會保存。模型接著呼叫工具、Codex 帶著工具結果再送下一個請求時，proxy 會在請求末端（與計畫提醒合併為同一則 developer 訊息）重申一句短提醒：續跑時「你是因為任務未完成而被接回，做完並驗證前不要停」；審查時「你在自我審查輪，檢查完、修正、驗證後以簡短摘要結束」。turn 真正結束（不再續跑）或新 turn 開始時清除。
+
+**續跑提醒的內容**（`continueText`）：未完成的原因、計畫進度與未完成步驟；最後一步失敗時引用該指令（前 160 字），要求先找根因、不要原樣重跑；程式改了沒驗證或測試仍失敗時，要求跑測試／建置／linter 並修到通過。
+
+### 3. 驗證關卡（`LUNA_VERIFY=on`）
+
+收工判斷的規則多兩條（排在徵求許可／承諾之後、「最後一步失敗」之前）：
+
+- 最後一次修改程式之後，最近一次測試或建置（`verify` 類指令，如 `npm test`、`pytest`、`cargo test`）失敗 → 0.7（`tests or build still fail after the last edit`）；
+- 修改程式之後沒有任何成功的檢查 → 0.65（`changed code without verifying it`）。其他成功執行的指令（`exec` 類，例如執行程式本身）也算檢查，避免沒有測試的專案被一直要求驗證；但版本控制（`git …`）、檔案搬移／刪除（`mkdir`、`cp`、`mv`、`rm` 等）與安裝（`npm install`、`pip install` 等）不算。被拒的 patch（工具結果失敗）不算修改。
+
+只改文件（`.md`、`.mdx`、`.markdown`、`.rst`、`.adoc`、`LICENSE`、`CHANGELOG` 等；檔名取自 `apply_patch` 的 `*** Add/Update/Delete File:` 與 `*** Move to:` 行，支援 Windows 反斜線路徑，或 `path` 參數）不需要驗證。`.txt` 不算文件，因為 `requirements.txt`、`CMakeLists.txt` 是建置輸入。兩條都高於預設門檻，因此「改完沒測就說完成」或「測試還紅就收工」會被接回去修。Luna 模式下這兩條同樣把關 Luna 的判斷；只有 Luna 判定 `needs_user` 時不續跑。`LUNA_VERIFY=off` 回到只看文字的規則。
+
+### 4. 自我審查（self-review，`LUNA_REVIEW_ROUNDS`，預設 1）
+
+收工判斷認為已完成（低於門檻）、不是在等使用者（沒有索取金鑰等，Luna 未判 `needs_user`，收尾最後一行也不是問句）、且本輪改過程式（自上次審查後有新的程式編輯；只改文件不算）時，proxy 再送一輪 `[luna] Self-review.`：重讀原始需求、檢查每一項是否完成；看自己的變更（例如 `git diff`）找 bug、漏掉的邊界情況、錯誤處理與殘留的除錯碼；確認測試涵蓋並執行測試；發現問題就修並重新驗證，沒有問題就以一句話說明自審無問題後收工。審查輪計入 `LUNA_MAX_CONTINUES`，不受停滯計數限制；`LUNA_REVIEW_ROUNDS=2` 時，只有上一輪審查後又改了程式才會再審。`0` 關閉。終端機顯示為 `REVIEW #n`，紀錄中 `continues[].kind` 為 `review`。
+
+自我審查讓模型「找出問題、修正問題」後才交還控制權：審查輪若修改程式，驗證關卡會再確保修改經過測試；全部通過後才真正結束 turn。
 
 **收工判斷（`lunaStopCheck`）**：
 
@@ -185,7 +207,7 @@ proxy 會暫扣上游的 `response.completed`。若同時符合以下條件，�
    - `end`（choice）：`will_continue`（打算或提議繼續）、`done`（說任務完成）、`needs_user`（需要使用者的金鑰、密碼、登入或決定）、`other`。
    - `in_progress`（predicate）：部分完成、還有剩。
 3. 合併：`end` 為 `needs_user` → `unfinished` = P(will_continue)。其他情況 → max(P(will_continue), P(in_progress), 規則分數)。例外：`end` 為 `done` 且機率 ≥ 0.9 時，不採計 `in_progress`。
-4. 規則分數：徵求許可的問句（would you like me to…?、要我…嗎？）或第一人稱承諾（next I'll、I will fix…、接下來我會、我會再修…）為 0.75；最後一步失敗為 0.5；其餘為 0.1。「if you want, I'll add docs」這類條件式提議不算承諾。
+4. 規則分數：徵求許可的問句（would you like me to…?、要我…嗎？）或第一人稱承諾（next I'll、I will fix…、接下來我會、我會再修…）為 0.75；驗證關卡（見下）為 0.7／0.65；最後一步失敗為 0.5；其餘為 0.1。「if you want, I'll add docs」這類條件式提議不算承諾。
 
 Luna 失敗時只用規則。`LUNA_MODE=heuristic` 或 `llm` 也只用規則；`LUNA_MODE=off` 不續跑。
 
@@ -321,7 +343,10 @@ aider 範例（未實測）：`aider --openai-api-base http://127.0.0.1:8791/v1 
 | `LUNA_MIN_CONFIDENCE` | `0.4` | Luna 信心低於此值即棄權，改用規則 |
 | `LUNA_EFFORT_QUANTILE` | `0.5` | 取 Luna 機率分布的哪個分位數作為級別；越高越偏向較高 effort |
 | `LUNA_CONTINUE` | `on` | 提早收工時自動續跑（僅 Responses 串流） |
-| `LUNA_MAX_CONTINUES` | `5` | 每個 turn 最多續跑次數 |
+| `LUNA_MAX_CONTINUES` | `20` | 每個 turn 最多續跑次數（含自我審查輪） |
+| `LUNA_MAX_STALLS` | `2` | 自上次有進展的續跑之後，再允許幾次無進展的續跑；`0` 只在有進展後才續跑 |
+| `LUNA_VERIFY` | `on` | 改了程式卻未驗證，或測試在最後一次修改後仍失敗，視為未完成 |
+| `LUNA_REVIEW_ROUNDS` | `1` | 每個 turn 的自我審查輪數；`0` 關閉 |
 | `LUNA_CONTINUE_THRESHOLD` | `0.6` | `unfinished` 達此值才續跑（0–1） |
 | `LUNA_NUDGE` | `on` | 計畫有未完成步驟時於請求末端附加提醒 |
 | `LUNA_JUDGE_MODEL` | 空（沿用請求的模型，routed 時為主模型） | `LUNA_MODE=llm` 的判官模型 |
@@ -340,12 +365,12 @@ aider 範例（未實測）：`aider --openai-api-base http://127.0.0.1:8791/v1 
 
 位於 `LUNA_HOME`（預設 `~/.luna-decision-openai`）：
 
-- `decisions.jsonl`：每個 routed generation 在回應結束後寫入一行，包含 `ts`、`session`、`api`、`step`、`effort`、`from`、`hold`、`reasons`、`source`、`cost`、`ms`、`model`、`requested`、`usage`、`status`，視情況另有 `suggestions`（Luna 與規則各自建議）、`adjustment`、`nudged`、`continues`。`stats` 讀的是這個檔。
+- `decisions.jsonl`：每個 routed generation 在回應結束後寫入一行，包含 `ts`、`session`、`api`、`step`、`effort`、`from`、`hold`、`reasons`、`source`、`cost`、`ms`、`model`、`requested`、`usage`、`status`，視情況另有 `suggestions`（Luna 與規則各自建議）、`adjustment`、`nudged`、`continues`（每次續跑一筆：`n`、`kind`（`resume` 或 `review`）、`effort`、`unfinished`、`source`、`reasons`，續跑另有 `stalls`）。`stats` 讀的是這個檔。
 - 只改模型的 `luna-auto` 請求（沒有 reasoning 參數）不呼叫 Luna，`source` 為 `model only`，effort 不套用。
 - `events.jsonl`：決策選定時寫入一行 `decision`，完成或失敗時寫入 `completed`／`failed`，以同一 `id` 對應。`tail` 在此檔存在時讀它，否則讀 `decisions.jsonl`；新版 proxy 的 `serve` 追蹤的也是此檔。
 - `proxy.log`：`codex` 子指令背景啟動的 proxy 的輸出。
 
-`/luna/health` 回報 `app`、`version`、`build`、`pid`、`startedAt`、`mode`、`model`、`ladder`、`decisionModel` 與 `stats`（`requests`、`routed`、`byEffort`、`reasoningTokens`、`continued`、`nudged`）。
+`/luna/health` 回報 `app`、`version`、`build`、`pid`、`startedAt`、`mode`、`model`、`ladder`、`decisionModel` 與 `stats`（`requests`、`routed`、`byEffort`、`reasoningTokens`、`continued`、`reviewed`、`nudged`）。
 
 ## 架構
 
@@ -355,7 +380,7 @@ aider 範例（未實測）：`aider --openai-api-base http://127.0.0.1:8791/v1 
 | `src/decisions.js` | Luna 決策：`effortCall()`、`situation()`、`requestBody()`（rubric 與快取欄位）、`toAssessment()`、`combineEffort()`（把關）、`lunaStopCheck()`、暫停與 explicit cache 退回 |
 | `src/policy.js` | 規則 `assess()` 與升降級 `nextState()` |
 | `src/router.js` | 金鑰選擇 `decisionKeyFor()`、各 session 的 effort 狀態與續跑次數 |
-| `src/longtask.js` | 計畫解析 `turnPlan()`、收尾文字 `finalOutput()`、規則版收工判斷 `assessStop()`、提醒與續跑訊息 |
+| `src/longtask.js` | 計畫解析 `turnPlan()`、收尾文字 `finalOutput()`、規則版收工判斷 `assessStop()`、驗證狀態 `verification()`、進展標記 `progressOf()`、提醒、續跑與自我審查訊息 |
 | `src/splice.js` | SSE 切分、暫扣 `response.completed`、把續跑回應接在同一條串流上 |
 | `src/trajectory.js`、`src/chat.js` | Responses 與 Chat Completions 的軌跡解析 |
 | `src/judge.js` | `LUNA_MODE=llm` 的判官 |
@@ -373,10 +398,10 @@ aider 範例（未實測）：`aider --openai-api-base http://127.0.0.1:8791/v1 
 ## 限制與未驗證事項
 
 - **未實測：** Codex 桌面版（`install --global`）、websocket 傳輸、長任務端到端效果，以及 `max` 與 `gpt-6.1-sol`、`gpt-6-astra` 的 effort 支援。程式只把 `minimal` 對應為 `low`，其餘 effort 原樣送出。
-- 本 repo 目前沒有 Luna 效果量測腳本。預設門檻（`LUNA_MIN_CONFIDENCE` 0.4、`LUNA_CONTINUE_THRESHOLD` 0.6、`LUNA_MAX_CONTINUES` 5、`LUNA_DECISION_TIMEOUT_MS` 3000）尚未以真實工作量調校。量測時請看 `stats` 與 `decisions.jsonl`。
+- 本 repo 目前沒有 Luna 效果量測腳本。預設門檻（`LUNA_MIN_CONFIDENCE` 0.4、`LUNA_CONTINUE_THRESHOLD` 0.6、`LUNA_MAX_CONTINUES` 20、`LUNA_MAX_STALLS` 2、`LUNA_REVIEW_ROUNDS` 1、`LUNA_DECISION_TIMEOUT_MS` 3000）尚未以真實工作量調校。量測時請看 `stats` 與 `decisions.jsonl`。
 - Luna 只收到結構化摘要（請求、步驟摘要、最近 8 步、收尾文字末 800 字），不會收到完整對話。
 - 規則的困難需求偵測是關鍵字比對，有漏判與誤判的可能。
-- 續跑的那一代同樣計入上游帳單。`decisions.jsonl` 的 `usage` 是 proxy 所見的最後一個 usage（續跑情況未實測）。
+- 續跑與自我審查的每一代同樣計入上游帳單；預設上限每 turn 20 次。自我審查預設每個改過程式的 turn 多一代。`decisions.jsonl` 的 `usage` 是 proxy 所見的最後一個 usage（續跑情況未實測）。
 - Chat Completions 不續跑；Codex 的 websocket 傳輸不經過 proxy。
 
 ## 測試與變更歷史
@@ -387,4 +412,5 @@ npm test     # node --test (test/)
 
 | 版本 | 內容 |
 |---|---|
+| v0.2.0 | 長任務持續與自我迭代：續跑上限改為每 turn 20 次＋無進展上限（`LUNA_MAX_STALLS`，預設 2）；續跑後的焦點提醒；只改模型的請求也會在新 turn 重設續跑預算；驗證關卡（`LUNA_VERIFY`：改了程式未驗證或測試仍失敗即續跑）；自我審查輪（`LUNA_REVIEW_ROUNDS`）；續跑提醒引用失敗指令並警告停滯；`stats` 與 `/luna/health` 計入自我審查 |
 | v0.1.0 | 初始建立：決策改由 OpenAI `gpt-6-luna`（Decisions API）；主模型預設 `gpt-6.1-terra`，可選 `gpt-6.1-sol`、`gpt-6-astra`；effort 階梯 `low`～`max`；規則把關與續跑；CLI `luna-decision-openai`（埠 8791、profile `luna-decision`） |

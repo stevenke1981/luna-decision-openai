@@ -1,7 +1,7 @@
 {
   "name": "luna-decision-openai",
-  "version": "0.1.0",
-  "description": "Runs one main GPT model (GPT-6.1 Terra by default; Sol and Astra selectable), lets OpenAI's Luna Decisions model pick the reasoning effort (low..max) per generation, and resumes long tasks the model stops too early.",
+  "version": "0.2.0",
+  "description": "Runs one main GPT model (GPT-6.1 Terra by default; Sol and Astra selectable), lets OpenAI's Luna Decisions model pick the reasoning effort (low..max) per generation, resumes long tasks the model stops too early, and sends changed code back for verification and a self-review before the turn ends.",
   "type": "module",
   "bin": {
     "luna-decision-openai": "bin/luna.js"
