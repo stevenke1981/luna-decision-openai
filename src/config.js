@@ -1,7 +1,7 @@
 import os from 'node:os';
 import path from 'node:path';
 
-export const EFFORTS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+export const EFFORTS = ['medium', 'high', 'xhigh', 'max'];
 
 // Main models the proxy knows by name. A client that asks for one of them keeps it; the
 // proxy only picks its effort. LUNA_MODELS adds more ids.
@@ -58,7 +58,7 @@ export function loadConfig(env = process.env) {
   // fallback (LUNA_AUTO_FALLBACK) for one that has none. When Luna fails, every decision falls
   // back to the rules, so no mode ever blocks a client.
   const mode = oneOf(env, 'LUNA_MODE', 'auto', ['auto', 'luna', 'heuristic', 'llm', 'off']);
-  const ladder = parseLadder(env.LUNA_LEVELS || 'low,medium,high,xhigh,max');
+  const ladder = parseLadder(env.LUNA_LEVELS || 'medium,high,xhigh,max');
   // A score question needs 2 to 10 levels.
   if ((mode === 'luna' || mode === 'auto') && ladder.length < 2) {
     throw new Error('LUNA_LEVELS needs at least 2 efforts for Luna to choose between');
@@ -113,7 +113,7 @@ export function loadConfig(env = process.env) {
     apiUpstream: env.LUNA_API_UPSTREAM || 'https://api.openai.com/v1',
     openrouterUpstream: env.LUNA_OPENROUTER_UPSTREAM || 'https://openrouter.ai/api/v1',
     judgeModel: env.LUNA_JUDGE_MODEL || '',
-    judgeEffort: env.LUNA_JUDGE_EFFORT || 'low',
+    judgeEffort: oneOf(env, 'LUNA_JUDGE_EFFORT', 'medium', EFFORTS),
     judgeTimeoutMs: intEnv(env, 'LUNA_JUDGE_TIMEOUT_MS', 2500),
     // OpenAI's Decisions API and its one model. Calls are billed to an API key:
     // LUNA_API_KEY, else OPENAI_API_KEY, else (LUNA_USE_CLIENT_KEY=on) a client's own sk- key.

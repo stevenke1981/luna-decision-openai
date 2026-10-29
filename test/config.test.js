@@ -4,11 +4,11 @@ import os from 'node:os';
 import path from 'node:path';
 import { loadConfig, KNOWN_MODELS } from '../src/config.js';
 
-test('defaults: auto mode (heuristic fallback), the low..max ladder at medium, gpt-6.1-terra on port 8791 with the Decisions API', () => {
+test('defaults: auto mode (heuristic fallback), the medium..max ladder at medium, gpt-6.1-terra on port 8791 with the Decisions API', () => {
   const cfg = loadConfig({});
   assert.equal(cfg.mode, 'auto');
   assert.equal(cfg.autoFallback, 'heuristic');
-  assert.deepEqual(cfg.ladder, ['low', 'medium', 'high', 'xhigh', 'max']);
+  assert.deepEqual(cfg.ladder, ['medium', 'high', 'xhigh', 'max']);
   assert.equal(cfg.defaultEffort, 'medium');
   assert.equal(cfg.model, 'gpt-6.1-terra');
   assert.equal(cfg.port, 8791);
@@ -56,14 +56,14 @@ test('models: the configured model comes first, then the known ones, then LUNA_M
 });
 
 test('LUNA_LEVELS: a valid custom ladder is kept, its names are normalized', () => {
-  const cfg = loadConfig({ LUNA_LEVELS: 'LOW, High', LUNA_DEFAULT_EFFORT: 'high' });
-  assert.deepEqual(cfg.ladder, ['low', 'high']);
+  const cfg = loadConfig({ LUNA_LEVELS: 'MEDIUM, High', LUNA_DEFAULT_EFFORT: 'high' });
+  assert.deepEqual(cfg.ladder, ['medium', 'high']);
   assert.equal(cfg.defaultEffort, 'high');
 });
 
 test('LUNA_LEVELS must ascend without repeats', () => {
-  assert.throws(() => loadConfig({ LUNA_LEVELS: 'high,low' }), /LUNA_LEVELS must go from least to most effort without repeats/);
-  assert.throws(() => loadConfig({ LUNA_LEVELS: 'low,low' }), /LUNA_LEVELS must go from least to most effort without repeats/);
+  assert.throws(() => loadConfig({ LUNA_LEVELS: 'high,medium' }), /LUNA_LEVELS must go from least to most effort without repeats/);
+  assert.throws(() => loadConfig({ LUNA_LEVELS: 'medium,medium' }), /LUNA_LEVELS must go from least to most effort without repeats/);
 });
 
 test('LUNA_LEVELS rejects unknown efforts and an empty list', () => {
@@ -74,7 +74,7 @@ test('LUNA_LEVELS rejects unknown efforts and an empty list', () => {
 test('LUNA_DEFAULT_EFFORT must be an effort on the ladder', () => {
   assert.throws(() => loadConfig({ LUNA_DEFAULT_EFFORT: 'turbo' }), /LUNA_DEFAULT_EFFORT must be one of LUNA_LEVELS/);
   assert.throws(() => loadConfig({ LUNA_DEFAULT_EFFORT: 'minimal' }), /LUNA_DEFAULT_EFFORT must be one of LUNA_LEVELS/);
-  assert.throws(() => loadConfig({ LUNA_LEVELS: 'low,high', LUNA_DEFAULT_EFFORT: 'xhigh' }), /LUNA_DEFAULT_EFFORT must be one of LUNA_LEVELS \(low,high\)/);
+  assert.throws(() => loadConfig({ LUNA_LEVELS: 'medium,high', LUNA_DEFAULT_EFFORT: 'xhigh' }), /LUNA_DEFAULT_EFFORT must be one of LUNA_LEVELS \(medium,high\)/);
 });
 
 test('LUNA_MODE accepts auto|luna|heuristic|llm|off and nothing else', () => {
@@ -114,4 +114,12 @@ test('LUNA_PORT overrides the port and LUNA_USE_CLIENT_KEY is an on|off switch',
   assert.equal(loadConfig({}).useClientKey, true);
   assert.equal(loadConfig({ LUNA_USE_CLIENT_KEY: 'off' }).useClientKey, false);
   assert.throws(() => loadConfig({ LUNA_USE_CLIENT_KEY: 'maybe' }), /LUNA_USE_CLIENT_KEY must be on\|off/);
+});
+
+test('routing and judge reject efforts below medium', () => {
+  for (const effort of ['none', 'minimal', 'low']) {
+    assert.throws(() => loadConfig({ LUNA_LEVELS: `${effort},medium` }), /LUNA_LEVELS/);
+    assert.throws(() => loadConfig({ LUNA_JUDGE_EFFORT: effort }), /LUNA_JUDGE_EFFORT/);
+  }
+  assert.equal(loadConfig({}).judgeEffort, 'medium');
 });

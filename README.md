@@ -1,8 +1,8 @@
 # luna-decision-openai — 單一 GPT 模型，OpenAI Luna 決定每一步的 effort，長任務不亂停
 
-> 只跑一個主模型（預設 GPT-6.1 Terra），每次 generation 的 reasoning effort（`low`～`max`）由 OpenAI 的 **`gpt-6-luna`** 決定；模型話說到一半就收工時，proxy 會把任務接回來做完。
+> 只跑一個主模型（預設 GPT-6.1 Terra），每次 generation 的 reasoning effort（`medium`～`max`）由 OpenAI 的 **`gpt-6-luna`** 決定；模型話說到一半就收工時，proxy 會把任務接回來做完。
 
-本專案是本機 proxy（預設 `http://127.0.0.1:8791/v1`），供 Codex、opencode、aider 等客戶端使用。它只執行一個主模型：預設 `gpt-6.1-terra`，可改選 `gpt-6.1-sol` 或 `gpt-6-astra`。每次 generation 送出前，proxy 透過 OpenAI [Decisions API](https://developers.openai.com/api/docs/guides/decisions) 呼叫 `gpt-6-luna`，決定這一步要用哪一級 reasoning effort（預設階梯 `low`、`medium`、`high`、`xhigh`、`max`）。Luna 的呼叫費用計入你的 OpenAI API 金鑰。Luna 棄權、逾時或失敗時改由本地規則決定，而且規則同時把關 Luna 的結果。
+本專案是本機 proxy（預設 `http://127.0.0.1:8791/v1`），供 Codex、opencode、aider 等客戶端使用。它只執行一個主模型：預設 `gpt-6.1-terra`，可改選 `gpt-6.1-sol` 或 `gpt-6-astra`。每次 generation 送出前，proxy 透過 OpenAI [Decisions API](https://developers.openai.com/api/docs/guides/decisions) 呼叫 `gpt-6-luna`，決定這一步要用哪一級 reasoning effort（預設階梯 `medium`、`high`、`xhigh`、`max`）。Luna 的呼叫費用計入你的 OpenAI API 金鑰。Luna 棄權、逾時或失敗時改由本地規則決定，而且規則同時把關 Luna 的結果。
 
 本專案衍生自 laya-gpt。預設埠 8791 與 Codex profile `luna-decision` 讓它可以和 laya-gpt（8790）同時執行。
 
@@ -116,7 +116,7 @@ proxy 依客戶端送出的金鑰選上游（`src/proxy.js` 的 `upstreamBase`�
 | `auto`（預設） | **每個請求各自判斷**：有 Luna 可用的金鑰就照 `luna` 模式；沒有就照 `LUNA_AUTO_FALLBACK`（預設 `heuristic`，可設 `llm`）。「有金鑰」指 `LUNA_API_KEY`、`OPENAI_API_KEY`，或客戶端自己送的 OpenAI 金鑰（條件同下節「Luna 用哪把金鑰」） | 同所選模式：`luna` 時由 Luna 判斷加規則把關，否則只用規則 | 有金鑰時同 `luna`；沒有金鑰時同 fallback（`heuristic` 免費） | 全部啟用 |
 | `luna` | OpenAI `gpt-6-luna`（Decisions API）。新 turn 由 Luna 決定；turn 中 Luna 只能調高，本地規則為下限 | Luna 讀收尾文字，規則把關（驗證關卡、計畫未完成等規則分數較高時以規則為準） | `OPENAI_API_KEY` 或 `LUNA_API_KEY`；每次決策約 $0.00015 以內。沒有金鑰、Luna 棄權（信心低於 `LUNA_MIN_CONFIDENCE`）或呼叫失敗時自動改用規則 | 全部啟用 |
 | `heuristic` | 只用本地規則（見下方「規則」） | 只用規則 | 不需要金鑰，不呼叫 Luna，沒有額外費用 | 全部啟用 |
-| `llm` | 以 `LUNA_JUDGE_MODEL`（未設定時用主模型）當判官，effort 為 `LUNA_JUDGE_EFFORT`（預設 `low`），逾時 `LUNA_JUDGE_TIMEOUT_MS`。只在 Responses 的第 2 步起使用；新 turn 的第一步、Chat Completions、判官失敗時用規則 | 只用規則 | 判官請求送往主模型的同一上游、使用客戶端的憑證，計入主模型帳單 | 全部啟用 |
+| `llm` | 以 `LUNA_JUDGE_MODEL`（未設定時用主模型）當判官，effort 為 `LUNA_JUDGE_EFFORT`（預設 `medium`），逾時 `LUNA_JUDGE_TIMEOUT_MS`。只在 Responses 的第 2 步起使用；新 turn 的第一步、Chat Completions、判官失敗時用規則 | 只用規則 | 判官請求送往主模型的同一上游、使用客戶端的憑證，計入主模型帳單 | 全部啟用 |
 | `off` | 不改 effort，客戶端送什麼就用什麼；只把 `luna-auto` 等別名改成 `LUNA_MODEL` | 不判斷 | 無 | 全部停用（純轉送） |
 
 選擇建議：
@@ -149,7 +149,7 @@ proxy 位於客戶端與上游之間。每次 generation 前，它讀取本輪�
 
 | 時機 | Luna 收到的 state | 問題 | 把關 |
 |---|---|---|---|
-| 新 turn（使用者送出新訊息） | `{"request": "<需求前 2000 字>"}` | `effort`：`score` 題，階梯每一級附一句說明（low＝小問題或單一小改，medium＝一般程式工作，high＝設計、跨模組重構、根因，xhigh＝架構、安全、並行，max＝最困難） | Luna 直接決定；棄權或失敗才用規則 |
+| 新 turn（使用者送出新訊息） | `{"request": "<需求前 2000 字>"}` | `effort`：`score` 題，階梯每一級附一句說明（medium＝小問題或一般程式工作，high＝設計、跨模組重構、根因，xhigh＝架構、安全、並行，max＝最困難） | Luna 直接決定；棄權或失敗才用規則 |
 | turn 中（第 2 步起，每次 generation 前） | `last_step`（一句話）、`recent_steps`（最近 8 步的 kind、command 前 160 字、status）、`steps_so_far`、`request` | `effort`（同上階梯）與 `stuck`（`predicate`：是否反覆失敗或重複同一失敗動作） | Luna 只能調高：Luna 的 effort 高於規則才採用，否則沿用規則並把 Luna 的理由附在後面 |
 
 Luna 的 effort 答案取 `LUNA_EFFORT_QUANTILE`（預設 0.5，即中位數）所在的級。信心（`confidence`，缺少時取最高機率）低於 `LUNA_MIN_CONFIDENCE`（預設 0.4）就棄權，改用規則。在 turn 中，若 Luna 勝出，保持時間（hold）為 `stuck` 機率決定的值（≥ 0.75 保持 2 個 generation，≥ 0.5 保持 1 個，< 0.25 立即解除）與規則的 hold 取較大者，因此失敗中的 agent 不會被 Luna 提早降級。
@@ -158,10 +158,10 @@ Luna 的 effort 答案取 `LUNA_EFFORT_QUANTILE`（預設 0.5，即中位數）�
 
 ### 規則（Luna 棄權或失敗時使用；turn 中也是下限）
 
-以下括號為預設階梯 `low,medium,high,xhigh,max` 下的級別：
+以下括號為預設階梯 `medium,high,xhigh,max` 下的級別：
 
 新 turn：
-- 招呼或致謝（hi、thanks、你好、謝謝 等）→ 最低級（low）。
+- 招呼或致謝（hi、thanks、你好、謝謝 等）→ 最低級（medium）。
 - 超過 600 字，或含 design、refactor、race、security、why、debug、設計、重構、除錯、為什麼 等詞，或問「如何運作、比較、分析」→ 預設再高一級（high）。
 - 其餘 → 預設級（medium，`LUNA_DEFAULT_EFFORT`）。
 
@@ -171,7 +171,7 @@ turn 中：
 - 剛失敗 1 次 → 中間級（medium），保持 1 個。
 - 最近從數次失敗中恢復 → medium，並可立即解除保持。
 - 剛改過程式（edit），或距上次 edit 已讀了 ≥ 4 個檔案 → medium。
-- 其他例行步驟（讀檔、搜尋、成功的指令）→ 最低級（low）。
+- 其他例行步驟（讀檔、搜尋、成功的指令）→ 最低級（medium）。
 
 ### 升降級（hysteresis）
 
@@ -363,7 +363,7 @@ aider 範例（未實測）：`aider --openai-api-base http://127.0.0.1:8791/v1 
 | `LUNA_MODEL` | `gpt-6.1-terra` | 主模型 id；`luna-auto` 別名與此 id 會改寫為它（`--model` 設定同一個值） |
 | `LUNA_MODELS` | 空 | 額外的主模型 id（逗號分隔），會列在 `models` 中 |
 | `LUNA_AUTO_MODELS` | `luna-auto,auto` | 會交由 router 改寫為 `LUNA_MODEL` 的客戶端模型名稱 |
-| `LUNA_LEVELS` | `low,medium,high,xhigh,max` | effort 階梯，必須由低到高、不可重複，也是 Luna 的選項；luna 模式至少要 2 級 |
+| `LUNA_LEVELS` | `medium,high,xhigh,max` | effort 階梯，必須由低到高、不可重複，也是 Luna 的選項；luna 模式至少要 2 級 |
 | `LUNA_DEFAULT_EFFORT` | `medium` | 新 turn 的規則預設、續跑後的下限；必須在階梯內（`--effort` 設定同一個值） |
 | `LUNA_MODE` | `auto` | `auto`（有金鑰用 `luna`，沒有用 `LUNA_AUTO_FALLBACK`）；`luna`；`heuristic`（只用規則，不呼叫 Luna）；`llm`（以 `LUNA_JUDGE_MODEL` 或主模型做判官，只在 Responses 第 2 步起）；`off`（不改 effort，只改別名模型）。詳見「運作模式」 |
 | `LUNA_AUTO_FALLBACK` | `heuristic` | `auto` 模式下沒有金鑰的請求改用的模式：`heuristic` 或 `llm` |
@@ -387,7 +387,7 @@ aider 範例（未實測）：`aider --openai-api-base http://127.0.0.1:8791/v1 
 | `LUNA_CONTINUE_THRESHOLD` | `0.6` | `unfinished` 達此值才續跑（0–1） |
 | `LUNA_NUDGE` | `on` | 計畫有未完成步驟時於請求末端附加提醒 |
 | `LUNA_JUDGE_MODEL` | 空（沿用請求的模型，routed 時為主模型） | `LUNA_MODE=llm` 的判官模型 |
-| `LUNA_JUDGE_EFFORT` | `low` | 判官的 effort |
+| `LUNA_JUDGE_EFFORT` | `medium` | 判官的 effort |
 | `LUNA_JUDGE_TIMEOUT_MS` | `2500` | 判官逾時 |
 | `LUNA_PROVIDER` | `chatgpt` | `chatgpt`、`openai` 或 `openrouter`：`install` 寫入的主模型驗證方式（`--provider` 設定同一個值） |
 | `LUNA_UPSTREAM` | 空 | 固定主模型上游；設定後忽略憑證判斷 |
@@ -451,4 +451,4 @@ npm test     # node --test (test/)
 |---|---|
 | v0.3.0 | 新增 `LUNA_MODE=auto` 並設為預設：每個請求有 Luna 金鑰就用 `luna`，沒有就用 `LUNA_AUTO_FALLBACK`（預設 `heuristic`，可選 `llm`）；`serve` 顯示 `auto→luna`／`auto→heuristic`；`/luna/health` 回報 `autoFallback` |
 | v0.2.0 | 長任務持續與自我迭代：續跑上限改為每 turn 20 次＋無進展上限（`LUNA_MAX_STALLS`，預設 2）；續跑後的焦點提醒；只改模型的請求也會在新 turn 重設續跑預算；驗證關卡（`LUNA_VERIFY`：改了程式未驗證或測試仍失敗即續跑）；自我審查輪（`LUNA_REVIEW_ROUNDS`）；續跑提醒引用失敗指令並警告停滯；`stats` 與 `/luna/health` 計入自我審查 |
-| v0.1.0 | 初始建立：決策改由 OpenAI `gpt-6-luna`（Decisions API）；主模型預設 `gpt-6.1-terra`，可選 `gpt-6.1-sol`、`gpt-6-astra`；effort 階梯 `low`～`max`；規則把關與續跑；CLI `luna-decision-openai`（埠 8791、profile `luna-decision`） |
+| v0.1.0 | 初始建立：決策改由 OpenAI `gpt-6-luna`（Decisions API）；主模型預設 `gpt-6.1-terra`，可選 `gpt-6.1-sol`、`gpt-6-astra`；effort 階梯 `medium`～`max`；規則把關與續跑；CLI `luna-decision-openai`（埠 8791、profile `luna-decision`） |

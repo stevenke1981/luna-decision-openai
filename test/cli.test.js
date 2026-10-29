@@ -289,7 +289,7 @@ test('models lists the main models and the effort ladder, starring gpt-6.1-terra
     assert.match(res.out, /^\* gpt-6\.1-terra$/m);
     assert.match(res.out, /^ {2}gpt-6\.1-sol$/m);
     assert.match(res.out, /^ {2}gpt-6-astra$/m);
-    assert.match(res.out, /effort ladder: low → medium → high → xhigh → max \(default medium\); decisions by gpt-6-luna/);
+    assert.match(res.out, /effort ladder: medium → high → xhigh → max \(default medium\); decisions by gpt-6-luna/);
   } finally {
     fs.rmSync(home, { recursive: true, force: true });
   }

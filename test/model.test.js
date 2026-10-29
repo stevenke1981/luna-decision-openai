@@ -15,7 +15,7 @@ const route = (router, input) => router.route({ input }, 's1', null, parseTurn(i
 
 test('config: one model, default effort medium, long-task help on', () => {
   assert.equal(config.model, 'gpt-6.1-terra');
-  assert.deepEqual(config.ladder, ['low', 'medium', 'high', 'xhigh', 'max']);
+  assert.deepEqual(config.ladder, ['medium', 'high', 'xhigh', 'max']);
   assert.equal(config.defaultEffort, 'medium');
   assert.equal(config.port, 8791);
   assert.deepEqual([config.continueTurns, config.maxContinues, config.continueThreshold, config.nudge], [true, 20, 0.6, true]);
@@ -49,17 +49,16 @@ test('modelId adds the openai/ prefix only on OpenRouter; clampEffort maps minim
 test('router: a resumed turn never drops below the default effort, and a new turn resets it', async () => {
   const router = createRouter(config);
   const first = [userMsg('list the files'), ...ok(1)];
-  assert.equal((await route(router, first)).effort, 'low');
+  assert.equal((await route(router, first)).effort, 'medium');
   assert.equal(router.continuesOf('s1'), 0);
 
   // The proxy resumed this turn: one rung up, at least the default.
-  assert.deepEqual(router.noteContinue('s1'), { continues: 1, effort: 'medium', stalls: 0, reviews: 0 });
+  assert.deepEqual(router.noteContinue('s1'), { continues: 1, effort: 'high', stalls: 0, reviews: 0 });
   assert.equal(router.continuesOf('s1'), 1);
 
   const later = [...first, ...ok(2), ...ok(3)];
   const d = await route(router, later);
   assert.equal(d.effort, 'medium');
-  assert.match(d.reasons.join(';'), /resumed turn keeps default effort/);
   assert.equal(router.continuesOf('s1'), 1);
 
   // A new user turn starts over.
@@ -166,7 +165,7 @@ test('router: luna leads a new turn but inside a turn it may only raise the effo
   const router = createRouter(loadConfig({ LUNA_MODE: 'luna' }), { decideFn });
   // The rules would start this hard request at high; luna reads it and picks medium.
   const d = await route(router, [userMsg('refactor the auth module')]);
-  assert.deepEqual([d.effort, d.source], ['medium', 'luna']);
+  assert.deepEqual([d.effort, d.source], ['high', 'luna']);
   // Three failures in a row: the rules escalate to the top rung (max) and luna's medium cannot lower it.
   const stuck = await router.route({}, 's2', null, parseTurn([userMsg('fix it'), ...fail(1), ...fail(2), ...fail(3)]));
   assert.equal(stuck.effort, 'max');
@@ -196,7 +195,7 @@ test('router: auto asks Luna only for a request with a key', async () => {
   const without = await router.route({ input }, 'a', null, parseTurn(input), { apiKey: '' });
   assert.deepEqual([without.source, calls], ['heuristic', 0]);
   const withKey = await router.route({ input }, 'b', null, parseTurn(input), { apiKey: 'sk-proj-abc' });
-  assert.deepEqual([withKey.source, withKey.effort, calls], ['luna', 'high', 1]);
+  assert.deepEqual([withKey.source, withKey.effort, calls], ['luna', 'xhigh', 1]);
 });
 
 test('router: auto with the llm fallback asks the judge when there is no key', async () => {
@@ -204,5 +203,5 @@ test('router: auto with the llm fallback asks the judge when there is no key', a
   const router = createRouter(loadConfig({ LUNA_AUTO_FALLBACK: 'llm' }), { judgeFn, decideFn: async () => { throw new Error('no luna'); } });
   const input = [userMsg('fix it'), ...ok(1)];
   const d = await router.route({ input }, 's', { url: 'u', headers: {} }, parseTurn(input), { apiKey: '' });
-  assert.deepEqual([d.source, d.effort], ['judge', 'xhigh']);
+  assert.deepEqual([d.source, d.effort], ['judge', 'max']);
 });

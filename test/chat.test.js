@@ -90,10 +90,10 @@ test('proxy routes streamed chat completions and records reasoning tokens', asyn
     const res = await h.post({ model: 'm', stream: true, reasoning_effort: 'low', messages });
     assert.match(await res.text(), /\[DONE\]/);
     assert.equal(h.seen[0].url, '/v1/chat/completions');
-    assert.equal(h.seen[0].body.reasoning_effort, 'high');
+    assert.equal(h.seen[0].body.reasoning_effort, 'xhigh');
     assert.deepEqual(h.seen[0].body.messages, messages);
     assert.equal(h.logged[0].api, 'chat');
-    assert.equal(h.stats.reasoningTokens.high, 12);
+    assert.equal(h.stats.reasoningTokens.xhigh, 12);
   } finally {
     h.close();
   }
@@ -106,8 +106,8 @@ test('proxy reads usage from a non-streamed chat reply and leaves non-reasoning 
   });
   try {
     await (await h.post({ model: 'm', reasoning: { effort: 'high' }, messages: [{ role: 'user', content: 'hi' }] })).json();
-    assert.equal(h.seen[0].body.reasoning.effort, 'low');
-    assert.equal(h.stats.reasoningTokens.low, 3);
+    assert.equal(h.seen[0].body.reasoning.effort, 'medium');
+    assert.equal(h.stats.reasoningTokens.medium, 3);
 
     await (await h.post({ model: 'gpt-4o', messages: [{ role: 'user', content: 'hi' }] })).json();
     assert.equal('reasoning' in h.seen[1].body || 'reasoning_effort' in h.seen[1].body, false);

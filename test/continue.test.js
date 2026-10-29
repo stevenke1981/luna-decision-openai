@@ -131,11 +131,11 @@ test('a turn that stops on a promise is resumed once, and the client sees one st
     await until(() => h.logged.length === 1);
     assert.equal(h.logged[0].status, 200);
     assert.deepEqual(h.logged[0].continues, [{
-      n: 1, kind: 'resume', effort: 'medium', unfinished: 0.75, source: 'heuristic', reasons: ['promises more work'], stalls: 0,
+      n: 1, kind: 'resume', effort: 'high', unfinished: 0.75, source: 'heuristic', reasons: ['promises more work'], stalls: 0,
     }]);
     assert.equal(h.stats.continued, 1);
     assert.deepEqual(h.printed.filter((s) => s.startsWith('Luna  RESUME')).map((s) => s.split('\n')[0]), [
-      'Luna  RESUME #1 → MEDIUM  ✓ APPLIED',
+      'Luna  RESUME #1 → HIGH  ✓ APPLIED',
     ]);
 
     const health = await (await fetch(`${h.base}/luna/health`)).json();
@@ -154,8 +154,8 @@ test('the continuation replays the output without ids, adds the [luna] developer
 
     const first = h.seen[0].body;
     const cont = h.seen[1].body;
-    assert.equal(first.reasoning.effort, 'low', 'the first generation runs at the routed effort');
-    assert.equal(cont.reasoning.effort, 'medium', 'the resumed generation climbs one rung');
+    assert.equal(first.reasoning.effort, 'medium', 'the first generation runs at the routed effort');
+    assert.equal(cont.reasoning.effort, 'high', 'the resumed generation climbs one rung');
     assert.deepEqual(cont.input.slice(0, input.length), input, 'the prior input is kept in order');
     assert.deepEqual(cont.input[input.length], {
       type: 'message', role: 'assistant', content: [{ type: 'output_text', text: PROMISE, annotations: [] }],
@@ -181,7 +181,7 @@ test('the decision log keeps the usage of the last generation and the reasoning 
     await until(() => h.logged.length === 1);
     assert.equal(h.logged[0].usage.output_tokens, 22);
     assert.equal(h.logged[0].usage.output_tokens_details.reasoning_tokens, 7);
-    assert.equal(h.stats.reasoningTokens.low, 7, 'reasoning tokens are counted under the routed effort');
+    assert.equal(h.stats.reasoningTokens.medium, 7, 'reasoning tokens are counted under the routed effort');
   } finally {
     h.close();
   }
@@ -197,9 +197,9 @@ test('chained resumes stop at LUNA_MAX_CONTINUES', async () => {
     const terminal = ev('response.completed', { response: { id: 'r1', output: outputs, usage: USAGE } });
     assert.equal(await res.text(), [...rounds[0].slice(0, -1), ...rounds[1].slice(2, -1), ...rounds[2].slice(2, -1), terminal].join(''));
     assert.equal(h.seen.length, 3);
-    assert.deepEqual(h.seen.map((s) => s.body.reasoning.effort), ['low', 'medium', 'high']);
+    assert.deepEqual(h.seen.map((s) => s.body.reasoning.effort), ['medium', 'high', 'xhigh']);
     await until(() => h.logged.length === 1);
-    assert.deepEqual(h.logged[0].continues.map((c) => [c.n, c.effort]), [[1, 'medium'], [2, 'high']]);
+    assert.deepEqual(h.logged[0].continues.map((c) => [c.n, c.effort]), [[1, 'high'], [2, 'xhigh']]);
     assert.equal(h.stats.continued, 2);
   } finally {
     h.close();
@@ -315,7 +315,7 @@ test('a luna score above the threshold resumes with source luna', async () => {
     await until(() => h.logged.length === 1);
     assert.equal(h.seen.length, 2);
     assert.deepEqual(h.logged[0].continues, [{
-      n: 1, kind: 'resume', effort: 'medium', unfinished: 0.8, source: 'luna', reasons: ['luna unfinished 0.80'], stalls: 0,
+      n: 1, kind: 'resume', effort: 'high', unfinished: 0.8, source: 'luna', reasons: ['luna unfinished 0.80'], stalls: 0,
     }]);
   } finally {
     h.close();
@@ -537,7 +537,7 @@ test('long task: a done turn with checked edits gets one self-review round, then
     await (await post(h, request([user('fix the parser'), ...editStep('e1'), ...shellStep('k1')]))).text();
     assert.equal(h.seen.length, 2, 'one review round, not two');
     assert.match(lastDeveloperText(h.seen[1].body), /^\[luna\] Self-review\. Before you finish/);
-    assert.equal(h.seen[1].body.reasoning.effort, 'medium');
+    assert.equal(h.seen[1].body.reasoning.effort, 'high');
     await until(() => h.logged.length === 1);
     assert.deepEqual(h.logged[0].continues.map((c) => [c.kind, c.n]), [['review', 1]]);
     assert.equal(h.stats.reviewed, 1);

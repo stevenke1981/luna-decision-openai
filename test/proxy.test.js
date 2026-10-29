@@ -58,7 +58,7 @@ test('rewrites only reasoning.effort and streams the response through', async ()
     const sent = JSON.parse(h.seen[0].body);
     assert.equal(h.seen[0].url, '/base/responses');
     assert.equal(h.seen[0].headers.authorization, 'Bearer sk-test');
-    assert.deepEqual(sent.reasoning, { effort: 'low', summary: 'auto' });
+    assert.deepEqual(sent.reasoning, { effort: 'medium', summary: 'auto' });
     assert.deepEqual({ ...sent, reasoning: body.reasoning }, body, 'everything else must be byte-identical for caching');
     await new Promise((r) => setTimeout(r, 20));
     assert.equal(h.logged[0].usage.output_tokens_details.reasoning_tokens, 7);
@@ -75,7 +75,7 @@ test('decodes zstd request bodies', async () => {
       method: 'POST', headers: { 'content-type': 'application/json', 'content-encoding': 'zstd' }, body: raw,
     });
     await res.text();
-    assert.equal(JSON.parse(h.seen[0].body).reasoning.effort, 'low');
+    assert.equal(JSON.parse(h.seen[0].body).reasoning.effort, 'medium');
     assert.equal(h.seen[0].headers['content-encoding'], undefined);
   } finally {
     h.close();
@@ -128,7 +128,7 @@ test('llm mode uses the judge and falls back to heuristic on error', async () =>
       await (await fetch(`http://127.0.0.1:${h.port}/v1/responses`, { method: 'POST', body: JSON.stringify(request(step(n))) })).text();
     }
     assert.equal(h.logged[0].source, 'judge');
-    assert.equal(JSON.parse(h.seen[0].body).reasoning.effort, 'high');
+    assert.equal(JSON.parse(h.seen[0].body).reasoning.effort, 'xhigh');
     assert.match(h.logged[1].source, /judge failed: timeout/);
   } finally {
     h.close();

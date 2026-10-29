@@ -18,7 +18,7 @@ const NAME = APP;
 // Codex profile name; `codex -p luna-decision` selects the provider written by `install`.
 const PROFILE = 'luna-decision';
 
-const HELP = `${NAME} — one main GPT model (GPT-6.1 Terra by default), reasoning effort low..max picked per
+const HELP = `${NAME} — one main GPT model (GPT-6.1 Terra by default), reasoning effort medium..max picked per
 generation by OpenAI's Luna Decisions model (gpt-6-luna, billed to your API key), and long-task help
 
 Usage:
@@ -45,7 +45,7 @@ Environment (also read from .env.local / .env in the project folder or LUNA_HOME
   OPENAI_API_KEY or LUNA_API_KEY  the key Luna calls are billed to (else a client's own sk- key)
   OPENROUTER_API_KEY  the main model's key with --provider openrouter (Luna still needs an OpenAI key)
   LUNA_PROVIDER (chatgpt|openai|openrouter)
-  LUNA_PORT (8791)  LUNA_MODEL (gpt-6.1-terra)  LUNA_LEVELS (low,medium,high,xhigh,max)  LUNA_DEFAULT_EFFORT (medium)
+  LUNA_PORT (8791)  LUNA_MODEL (gpt-6.1-terra)  LUNA_LEVELS (medium,high,xhigh,max)  LUNA_DEFAULT_EFFORT (medium)
   LUNA_MODE (auto|luna|heuristic|llm|off)  LUNA_AUTO_FALLBACK (heuristic|llm)  LUNA_DECISION_MODEL (gpt-6-luna)  LUNA_DECISION_TIMEOUT_MS (3000)
   LUNA_MIN_CONFIDENCE (0.4)  LUNA_EFFORT_QUANTILE (0.5)  LUNA_CACHE (explicit|implicit|off)  LUNA_USE_CLIENT_KEY (on|off)
   LUNA_CONTINUE (on|off)  LUNA_MAX_CONTINUES (20)  LUNA_MAX_STALLS (2)  LUNA_CONTINUE_THRESHOLD (0.6)  LUNA_NUDGE (on|off)
@@ -325,8 +325,8 @@ function tail(config, live = fs.existsSync(config.eventFile)) {
 }
 
 function rankEffort(effort) {
-  const i = EFFORTS.indexOf(effort);
-  return i >= 0 ? i : EFFORTS.length;
+  const i = ['none', 'minimal', 'low', ...EFFORTS].indexOf(effort);
+  return i >= 0 ? i : EFFORTS.length + 3;
 }
 
 /** Groups decisions by effort in ladder order; rows that set only the model go under "-". */
