@@ -1,177 +1,278 @@
-# luna-decision-openai — 單一 GPT 模型、本機 luna 決定 effort、長任務不亂停
+# luna-decision-openai — 單一 GPT 模型，OpenAI Luna 決定每一步的 effort，長任務不亂停
 
-> 只用一個模型（預設 GPT-6.1 Terra），每次 generation 由**本機 luna** 在 low～xhigh 之間決定 reasoning effort（新 turn 預設 medium），
-> 並在模型「話說到一半就收工」時把任務接回來做完。
+> 只跑一個主模型（預設 GPT-6.1 Terra），每次 generation 的 reasoning effort（`low`～`max`）由 OpenAI 的 **`gpt-6-luna`** 決定；模型話說到一半就收工時，proxy 會把任務接回來做完。
 
-本專案衍生自 [jev-gpt](https://github.com/stevenke1981/jev-gpt)（871082f）。差異：
+本專案是本機 proxy（預設 `http://127.0.0.1:8791/v1`），供 Codex、opencode、aider 等客戶端使用。它只執行一個主模型：預設 `gpt-6.1-terra`，可改選 `gpt-6.1-sol` 或 `gpt-6-astra`。每次 generation 送出前，proxy 透過 OpenAI [Decisions API](https://developers.openai.com/api/docs/guides/decisions) 呼叫 `gpt-6-luna`，決定這一步要用哪一級 reasoning effort（預設階梯 `low`、`medium`、`high`、`xhigh`、`max`）。Luna 的呼叫費用計入你的 OpenAI API 金鑰。Luna 棄權、逾時或失敗時改由本地規則決定，而且規則同時把關 Luna 的結果。
 
-| | jev-gpt | luna-decision-openai |
+本專案衍生自 laya-gpt。預設埠 8791 與 Codex profile `luna` 讓它可以和 laya-gpt（8790）同時執行。
+
+## Quick start
+
+```powershell
+# Windows PowerShell, in the repository folder
+npm link                                    # required once: registers the luna-decision-openai command
+luna-decision-openai --version
+$env:OPENAI_API_KEY = "sk-..."              # the key Luna calls are billed to (this window only; or use .env.local, see API keys)
+luna-decision-openai probe                  # one live gpt-6-luna call: checks the key and the call shape
+luna-decision-openai install                # writes $CODEX_HOME\luna.config.toml (default ~\.codex)
+luna-decision-openai codex                  # starts the proxy in the background if needed, then runs: codex -p luna
+```
+
+```bash
+# bash, in the repository folder
+npm link
+export OPENAI_API_KEY=sk-...
+luna-decision-openai probe
+luna-decision-openai install
+luna-decision-openai codex
+```
+
+Keys can also live in `.env.local` (copy `.env.example`), or in a system environment variable that survives new terminals; see [API keys / 金鑰設定](#api-keys--金鑰設定).
+
+Other clients (opencode, aider, crush) and the live view of decisions:
+
+```text
+luna-decision-openai serve        # foreground proxy; prints every decision
+base URL  http://127.0.0.1:8791/v1
+model     luna-auto               # or: auto
+```
+
+Choosing the main model: `luna-decision-openai install --model gpt-6.1-sol` (profile), `luna-decision-openai codex --model gpt-6-astra` (this run), or `LUNA_MODEL=gpt-6.1-sol` for `serve`.
+
+If `npm link` was run but the command is not found, reopen the terminal. You can also run the CLI directly with `node bin\luna.js <command>`.
+
+## 快速開始
+
+1. 安裝 Node.js ≥ 22.15 與 Codex CLI（`npm i -g @openai/codex`）。
+2. 在專案資料夾執行 `npm link`，註冊 `luna-decision-openai` 指令（必做一次）。
+3. 設定金鑰（見下節「API keys／金鑰設定」）：系統環境變數、專案的 `.env.local`，或 `~/.luna-decision-openai/.env.local`。只想對目前視窗生效時，PowerShell 用 `$env:OPENAI_API_KEY = "sk-..."`，bash 用 `export OPENAI_API_KEY=sk-...`。
+4. `luna-decision-openai probe`：實際呼叫一次 `gpt-6-luna`，確認金鑰與呼叫形狀。
+5. `luna-decision-openai install`，然後 `luna-decision-openai codex`（自動啟動 proxy 並以 `codex -p luna` 開啟 Codex）。
+6. 要換主模型：`luna-decision-openai codex --model gpt-6.1-sol`。其他客戶端請把 base URL 設為 `http://127.0.0.1:8791/v1`、model 設為 `luna-auto`。
+
+## 安裝需求
+
+- Node.js ≥ 22.15。`package.json` 沒有 dependencies，不需要 `npm install`。
+- Codex CLI。在 Windows 上，`codex` 子指令要找 npm 安裝的版本（`codex.cmd` 與 `@openai/codex`）；找不到時會提示改用 `serve` 再執行 `codex -p luna`。
+- OpenAI API 金鑰（`OPENAI_API_KEY` 或 `LUNA_API_KEY`）。`LUNA_MODE=heuristic` 只用規則，不需要金鑰。
+
+## API keys / 金鑰設定
+
+### 三種金鑰
+
+| 變數 | 用途 | 必要性 |
 |---|---|---|
-| 決策模型 | OpenRouter 上的 `typesafe/jev-1.14`（需金鑰、按次計費） | **本機 [luna-deploy](https://github.com/stevenke1981/luna-deploy)**（`127.0.0.1:8100`，免金鑰，每次約 40–300 ms） |
-| 問法 | `score`／`noul`，state 為整段軌跡 | **luna decision mode**：state 只放一句被判斷的主體、全用 `choice`、無 catch-all、門檻由程式持有 |
-| 信任方式 | 信心 ≥ 0.3 即採用 | **luna 受規則把關**：信心 < 0.5 棄權改用規則；turn 中 luna 只能調高 effort；停止判斷與規則取大 |
-| 長任務 | 計畫提醒＋續跑（上限 3） | 同上，**上限 5**，另加「第一人稱承諾工作」規則（I will fix…／我會再修…） |
-| 預設埠／home／Codex profile | 8789／`~/.jev-gpt`／`jevgpt` | **8790**／`~/.luna-decision-openai`／`luna` |
+| `OPENAI_API_KEY` | 每次 Luna 決策的費用（Decisions API，`gpt-6-luna`，依決策計費）。`install --provider openai` 時也是主模型的金鑰 | Luna 需要；沒有時 effort 由規則決定 |
+| `OPENROUTER_API_KEY` | `install --provider openrouter` 時，主模型經 OpenRouter 的金鑰（`sk-or-`） | 只有選 openrouter 時需要。**Luna 仍需 `OPENAI_API_KEY`**，因為 OpenRouter 金鑰不能呼叫 Decisions API |
+| `LUNA_API_KEY` | 只給 Luna 用的獨立金鑰，優先於 `OPENAI_API_KEY` | 選用 |
 
-jev-gpt 與 luna-decision-openai 可同時執行。
+### 主模型的登入方式（`install --provider` 或 `LUNA_PROVIDER`，預設 `chatgpt`）
 
-## 快速開始（Windows PowerShell）
+| provider | Codex profile 寫入 | 主模型去向 |
+|---|---|---|
+| `chatgpt` | `requires_openai_auth = true`（沿用 Codex 的 ChatGPT 登入） | ChatGPT 後端 |
+| `openai` | `env_key = "OPENAI_API_KEY"` | Codex 送出 `sk-` 金鑰，proxy 轉到 `api.openai.com` |
+| `openrouter` | `env_key = "OPENROUTER_API_KEY"` | Codex 送出 `sk-or-` 金鑰，proxy 轉到 OpenRouter，模型 id 改為 `openai/<id>` |
 
-先裝好 [Node.js](https://nodejs.org/) ≥ 22.15、`git`、[uv](https://docs.astral.sh/uv/)（`powershell -c "irm https://astral.sh/uv/install.ps1 | iex"`）與 Codex CLI，然後：
+proxy 依客戶端送出的金鑰選上游（`src/proxy.js` 的 `upstreamBase`）。`openai` 與 `openrouter` 時，Codex 讀取 `env_key` 指定的環境變數。不論哪種 provider，Luna 的決策金鑰都由 `LUNA_API_KEY` 或 `OPENAI_API_KEY` 決定。`serve` 在 provider 為 `openrouter` 且未設定 `OPENROUTER_API_KEY` 時會提示。
 
-```powershell
-git clone https://github.com/stevenke1981/luna-decision-openai.git
-cd luna-decision-openai
-npm link                                 # ← 必做：把 luna-decision-openai 註冊成指令；沒做會出現「無法辨識 'luna-decision-openai' 詞彙」
-luna-decision-openai --version                       # 應顯示 luna-decision-openai v0.3.1
-luna-decision-openai setup                           # 安裝本機 luna（約 3 GB＋模型約 650 MB，預設放 ~\.luna-decision-openai\luna-deploy）
-#   想放其他磁碟：luna-decision-openai setup --dir E:\luna-deploy
-luna-decision-openai install                         # 寫入 Codex profile
-luna-decision-openai codex                           # 自動啟動 luna 與 proxy，再開 Codex
-```
+### 三種設定方式
 
-`npm link` 後仍找不到 `luna-decision-openai`：關掉並重開 PowerShell；仍不行就確認 `npm prefix -g` 顯示的資料夾在 PATH 裡。也可不註冊指令，直接執行 `node bin\luna.js <指令>`（例如 `node bin\luna.js setup`）。
+1. **系統環境變數**（Windows，持久）：
+   ```powershell
+   [Environment]::SetEnvironmentVariable('OPENAI_API_KEY', 'sk-...', 'User')
+   ```
+   設定後要開新的終端機才讀得到。bash 則用 `export OPENAI_API_KEY=sk-...`，寫入 shell 設定檔才會持久。
+2. **專案的 `.env.local`**：
+   ```powershell
+   Copy-Item .env.example .env.local   # then edit the file
+   ```
+   ```bash
+   cp .env.example .env.local
+   ```
+3. **全域安裝（npm link）的 `~/.luna-decision-openai/.env.local`**（`LUNA_HOME` 可改位置）。
 
-## luna 由 luna-decision-openai 安裝與啟動
+### 優先順序
 
-luna 本身是 Python（torch＋luna），放在獨立的 [luna-deploy](https://github.com/stevenke1981/luna-deploy) checkout；luna-decision-openai 負責安裝、啟動、停止它，自己仍零依賴。以下指令需先完成 `npm link`（見「快速開始」）。
+1. 已設定的系統或 shell 環境變數（非空字串）永遠優先，檔案不會覆蓋它。
+2. 專案資料夾的 `.env.local`，再 `.env`。
+3. `LUNA_HOME`（預設 `~/.luna-decision-openai`）的 `.env.local`，再 `.env`。
 
-```powershell
-luna-decision-openai setup                          # 第一次：clone luna-deploy 到 ~/.luna-decision-openai/luna-deploy、uv sync（約 3 GB）、下載 multilingual（約 650 MB）
-luna-decision-openai setup --dir E:\luna-deploy     # 指定安裝位置，或改用既有的 luna-deploy checkout（會記住此路徑）
-```
+同一變數先找到者勝出。`serve` 啟動時會列出載入了哪些檔案與變數名稱（不印出值）。
 
-需要 `git` 與 [uv](https://docs.astral.sh/uv/)；`--dir` 指向的資料夾須不存在、為空，或已是 luna-deploy checkout。`setup` 可重複執行（已 clone 則略過，只再 `uv sync` 與確認模型已下載）。之後 `luna-decision-openai serve`（或 `luna-decision-openai codex`）發現 8100 沒有 luna 時，會在背景以該 checkout 的 `.venv` Python 啟動 luna-deploy，並預先載入 luna-decision-openai 用的 checkpoint（`LUNA_DEPLOY_PRELOAD`），不等它載完——載入期間（約 10–40 秒）決策先用規則。`luna-decision-openai status` 顯示 luna 狀態；`luna-decision-openai stop` 會一併停掉**由 luna-decision-openai 啟動的** luna（手動啟動的不動）。`LUNA_AUTOSTART=off` 關閉自動啟動；`LUNA_DECISION_URL` 不是本機位址時也不會自動啟動。
+注意：
 
-luna 未啟動時 luna-decision-openai 照常運作：每次決策連線失敗即改用規則（`source` 會寫 `heuristic (luna failed: …)`），不擋住客戶端。luna 若卡住不回（例如 checkpoint 第一次載入約 40 秒），一次逾時（`LUNA_DECISION_TIMEOUT_MS`，2 秒）後暫停呼叫 luna 30 秒，期間直接用規則，不再每次等逾時。
+- `.env.local` 與 `.env` 已列入 `.gitignore`，**不要 commit 它們**。`.env.example` 是可提交的範本。
+- Codex 桌面版與 IDE 擴充（`install --global`）只讀系統環境變數，不讀 `.env.local`。provider 是 `openai` 或 `openrouter` 時，請把對應金鑰設為系統環境變數，否則 Codex 讀不到 `env_key`。provider 是 `chatgpt` 時不受影響。
 
-## Effort 如何決定
+## 工作方式
 
-proxy 位於 Codex（或 Chat Completions 客戶端）與上游之間，每次 generation 前讀取本輪軌跡，向 luna 問一題（state 只有一句話）：
+### Effort 如何決定
 
-| 時機 | state | 問題（`choice`，選項即 effort 階梯） | 把關 |
+proxy 位於客戶端與上游之間。每次 generation 前，它讀取本輪的軌跡並向 Luna 提問。
+
+| 時機 | Luna 收到的 state | 問題 | 把關 |
 |---|---|---|---|
-| 新 turn | `{"request": "<使用者需求前 800 字>"}` | 這個需求要多少推理？low＝招呼／簡單問題、medium＝一般程式工作、high＝設計／跨模組重構／除錯根因、xhigh＝系統重設計／久攻不下的安全或並行問題 | luna 主導；最高機率 < 0.5 則棄權改用規則 |
-| turn 中 | `{"last_step": "ran the tests or build, it failed; 2 failures in a row; the same failing command was repeated"}` | 下一步要多少推理？＋是否卡住（`stuck`／`progressing`） | luna **只能調高**：與規則取較高者，同級時沿用規則（含 hold）。luna 不擅長數失敗次數，故 luna 不能把 effort 調得比規則低（luna 勝出時 hold 改依其 `stuck` 機率） |
+| 新 turn（使用者送出新訊息） | `{"request": "<需求前 2000 字>"}` | `effort`：`score` 題，階梯每一級附一句說明（low＝小問題或單一小改，medium＝一般程式工作，high＝設計、跨模組重構、根因，xhigh＝架構、安全、並行，max＝最困難） | Luna 直接決定；棄權或失敗才用規則 |
+| turn 中（第 2 步起，每次 generation 前） | `last_step`（一句話）、`recent_steps`（最近 8 步的 kind、command 前 160 字、status）、`steps_so_far`、`request` | `effort`（同上階梯）與 `stuck`（`predicate`：是否反覆失敗或重複同一失敗動作） | Luna 只能調高：Luna 的 effort 高於規則才採用，否則沿用規則並把 Luna 的理由附在後面 |
 
-`last_step` 由程式把數字轉成少數固定片語（first failure／2 failures in a row／4 or more failures in a row／read 5 files since the last edit…），相同情境問相同問題。
+Luna 的 effort 答案取 `LUNA_EFFORT_QUANTILE`（預設 0.5，即中位數）所在的級。信心（`confidence`，缺少時取最高機率）低於 `LUNA_MIN_CONFIDENCE`（預設 0.4）就棄權，改用規則。在 turn 中，若 Luna 勝出，保持時間（hold）為 `stuck` 機率決定的值（≥ 0.75 保持 2 個 generation，≥ 0.5 保持 1 個，< 0.25 立即解除）與規則的 hold 取較大者，因此失敗中的 agent 不會被 Luna 提早降級。
 
-規則（`src/policy.js`，luna 棄權或失敗時使用，也是 turn 中的下限）：新 turn 預設 medium，招呼 → low，困難／深入／超過 600 字 → high；turn 中例行步驟 → low，剛改程式或累積讀檔 → medium，連續失敗 → high／xhigh 並鎖定數步。一旦本輪被續跑過，之後 effort 不低於預設值。
+`last_step` 不是原始輸出，而是由程式把工具結果轉成固定片語（例如 `ran the tests or build, it failed; 2 failures in a row; the same failing command was repeated`），相同情境問相同問題。
 
-改寫範圍：只改 effort（Responses 的 `reasoning.effort`；Chat 的 `reasoning_effort` 或 `reasoning.effort`），客戶端 model 為 `luna-auto`／`auto` 時另把 `model` 改成設定的模型 id。`instructions`、`tools` 與既有 `input` 不變，prompt cache 前綴維持命中；長任務協助只在**請求末端**附加訊息。
+### 規則（Luna 棄權或失敗時使用；turn 中也是下限）
+
+以下括號為預設階梯 `low,medium,high,xhigh,max` 下的級別：
+
+新 turn：
+- 招呼或致謝（hi、thanks、你好、謝謝 等）→ 最低級（low）。
+- 超過 600 字，或含 design、refactor、race、security、why、debug、設計、重構、除錯、為什麼 等詞，或問「如何運作、比較、分析」→ 預設再高一級（high）。
+- 其餘 → 預設級（medium，`LUNA_DEFAULT_EFFORT`）。
+
+turn 中：
+- 連續 3 次以上失敗，或最近 6 步內失敗指令重複出現 2 次以上（且最後一步仍失敗）→ 最高級（max），保持 2 個 generation。
+- 連續 2 次失敗 → 第三級（high），保持 2 個。
+- 剛失敗 1 次 → 中間級（medium），保持 1 個。
+- 最近從數次失敗中恢復 → medium，並可立即解除保持。
+- 剛改過程式（edit），或距上次 edit 已讀了 ≥ 4 個檔案 → medium。
+- 其他例行步驟（讀檔、搜尋、成功的指令）→ 最低級（low）。
+
+### 升降級（hysteresis）
+
+- 升級立即生效。
+- 降級每個 generation 最多降一級，且先依 hold 保持。
+- 同一 turn 續跑過之後，effort 不低於 `LUNA_DEFAULT_EFFORT`。
+- 同一 session 的狀態依請求的 `prompt_cache_key` 保存，沒有時依 `session_id`、`conversation_id` 標頭；新 turn 會重設。
+
+### 為什麼針對 Luna 最佳化
+
+這些設計寫在 `src/decisions.js` 的檔頭註解與常數中：
+
+- **score＋分位數**：effort 是 `score` 題，階梯每一級是有序選項。Luna 回傳整個機率分布，proxy 取分位數而不是 argmax，所以能尊重級別的順序，Luna 不確定時也不會跳到不相鄰的級。
+- **predicate 表示是非題**：`stuck`（turn 中）與 `in_progress`（收工判斷）各只有一個機率。
+- **狀態用 `input_json`**：只傳結構化的 JSON，不傳整段對話；每次呼叫只有這份 JSON 不同。
+- **共用 rubric 與快取**：rubric 有 5,531 個字元（估計約 1.3k tokens，以約 4 字元／token 估算；確切值以 `probe` 輸出為準），每次呼叫都相同，放在最前面，並且以 explicit cache breakpoint 與 `prompt_cache_key`（`luna-decision-openai/v1`）標記，因此前綴可快取。rubric 需超過 1,024 tokens 才會被快取，目前估計高於此門檻。快取命中率尚未在本次實測。
+- **價格**：依官方指南，未快取輸入為 $0.10／1M tokens，輸出免費（`src/decisions.js` 的 `USD_PER_INPUT_TOKEN`）。估計每次決策約 1.3k 輸入 tokens，以未快取價計算，單次上限約 $0.00013。
+- **費用上限**：`luna-decision-openai stats` 會把所有決策的輸入 tokens 以未快取價加總，輸出 `Luna decisions cost at most $…`。這是上限，不是實際帳單。
+
+每個 routed generation 都會有一次 Luna 呼叫，所以費用隨 generation 數成長。同步等待也會增加延遲：每次 generation 前最多等 `LUNA_DECISION_TIMEOUT_MS`（預設 3000 ms）。
 
 ## 長任務協助：不讓 GPT-6.1 Terra 亂停
 
-GPT-6.1 Terra 在長任務中常提早結束 turn：寫個摘要、說「接下來我會…」、或問「要我繼續嗎？」，但工作其實沒做完。
+主模型在長任務中常提早結束 turn：寫一段摘要、說「接下來我會…」、或問「要我繼續嗎？」，但工作其實沒做完。本專案有兩個機制處理這件事。
 
 ### 1. 計畫提醒（nudge，`LUNA_NUDGE=on`）
 
-本輪計畫（Codex `update_plan`；Chat 另讀 `todowrite`／`TodoWrite`）還有未完成步驟時，每次 generation 前在請求末端附加提醒：已完成幾步、還剩哪些、全部做完並驗證前不要收工、不要停下來問是否繼續。
+本輪計畫（Codex 的 `update_plan`；Chat 另讀 `todowrite`／`TodoWrite`）還有未完成步驟時，proxy 在每次 generation 前於請求末端附加提醒：已完成幾步、還剩哪些、全部完成並驗證前不要收工、不要停下來問是否繼續。Responses 以 developer 訊息附加，Chat 以 system 訊息附加。
 
 ### 2. 提早收工自動續跑（resume，`LUNA_CONTINUE=on`）
 
-適用於串流的 Responses 請求（Codex）。proxy 暫扣上游最後的 `response.completed`，若這一代沒有工具呼叫（要把控制權交還使用者）、本輪做過事或有計畫、續跑未達 `LUNA_MAX_CONTINUES`（預設 5），且 `unfinished` ≥ `LUNA_CONTINUE_THRESHOLD`（預設 0.6），就立刻帶著原請求＋剛才的輸出＋一則 `[luna]` developer 訊息再送一次，effort 提高一階（至少為預設值），新事件接在同一條串流上送回 Codex。
+只適用於串流的 Responses 請求（Codex）。Chat Completions 不續跑。
 
-停止判斷（luna 模式，`src/decisions.js` 的 `lunaStopCheck`）：
+proxy 會暫扣上游的 `response.completed`。若同時符合以下條件，就立即帶著原請求、剛才的輸出與一則 `[luna]` 提醒再送一次，新事件接在同一條串流上送回客戶端，客戶端只看到一個完整 turn：
 
-1. **硬規則先決，不問 luna**：本輪沒做事 → 0；向使用者索取只有他有的東西（API key、密碼、請提供、請先登入、哪一個…）→ 0.1；計畫有未完成步驟 → 0.9。
-2. 否則把**收尾文字末 500 字**當 state（`{"closing": "…"}`），一次問兩題：
-   - `end`：`will_continue`（打算或提議繼續同一任務）／`done`（說任務完成）／`needs_user`（要金鑰、密碼、登入或只有使用者能做的決定）
-   - `work`：`in_progress`（部分完成、還有剩）／`complete`（全部完成並驗證）
-3. `end` 選 `needs_user` → `unfinished` = P(will_continue)（合理停下，規則不加碼）；否則 `unfinished` = max(P(will_continue), P(in_progress), 規則分數)。規則分數：徵求許可的問句（would you like me to…?、要我…嗎）或第一人稱承諾（next I'll、I will fix…、接下來我會、我會再修…）0.75；最後一步失敗 0.5；其餘 0.1。「if you want, I'll add docs」「如果你需要，我會補上文件」這類提議不算。
+- 這一代沒有需要客戶端執行的工具呼叫（即要把控制權交還使用者）；
+- 本輪做過事，或有計畫；
+- 本輪續跑次數未達 `LUNA_MAX_CONTINUES`（預設 5）；
+- `unfinished` ≥ `LUNA_CONTINUE_THRESHOLD`（預設 0.6）。
 
-luna 失敗時只用規則。`heuristic`／`llm` 模式只用規則；`off` 不續跑。
+續跑的那一代 effort 提高一級（至少為預設值）。
 
-### 實測（`node scripts/luna-eval.mjs`，RTX 3060 Ti）
+**收工判斷（`lunaStopCheck`）**：
 
-預設 checkpoint 自 v0.3.0 起為 **multilingual**（主人實際使用時 english 容易跑偏，尤其中文與混雜文字）。同一組 29 題：multilingual **26/29**、english 28/29。
+1. 硬規則先決，不問 Luna：沒有任何工作 → 0；計畫仍有未完成步驟 → 0.9；收尾向使用者索取只有他能給的東西（金鑰、密碼、請提供、請先登入 等）→ 0.1。
+2. 否則把收尾文字末 800 字，加上請求與步數，送給 Luna 一次，同時問兩題：
+   - `end`（choice）：`will_continue`（打算或提議繼續）、`done`（說任務完成）、`needs_user`（需要使用者的金鑰、密碼、登入或決定）、`other`。
+   - `in_progress`（predicate）：部分完成、還有剩。
+3. 合併：`end` 為 `needs_user` → `unfinished` = P(will_continue)。其他情況 → max(P(will_continue), P(in_progress), 規則分數)。例外：`end` 為 `done` 且機率 ≥ 0.9 時，不採計 `in_progress`。
+4. 規則分數：徵求許可的問句（would you like me to…?、要我…嗎？）或第一人稱承諾（next I'll、I will fix…、接下來我會、我會再修…）為 0.75；最後一步失敗為 0.5；其餘為 0.1。「if you want, I'll add docs」這類條件式提議不算承諾。
 
-| 項目 | multilingual | 說明 |
-|---|---|---|
-| 新 turn effort | 7/9 | 「hi there」給 medium（預期 low）；「重構整個認證架構並找出 session 競態的根因」給 xhigh 0.51（預期 high）——兩者都只是多花推理，不會少做 |
-| turn 中 effort | 6/7 | 第一次失敗給 high（預期 medium），偏保守 |
-| 停止判斷 | 13/13 | 加入「`end` 以 ≥ 0.9 判定已完成時忽略 `work` 的進行中」把關後；未加時，完成的條列摘要會被誤判續跑 |
+Luna 失敗時只用規則。`LUNA_MODE=heuristic` 或 `llm` 也只用規則；`LUNA_MODE=off` 不續跑。
 
-以下為 v0.1 時 english 的分項：
+## 憑證、上游與費用
 
-| 項目 | 結果 | 說明 |
-|---|---|---|
-| 新 turn effort | 9/9 | 招呼、一般工作由 luna 判定（中英文皆對）；三個困難需求 luna 信心 0.37–0.40 而棄權，由規則判為 high |
-| turn 中 effort | 6/7 | 唯一不同：第一次失敗 luna 給 high（預期 medium）——luna 只能調高，屬偏保守 |
-| 停止判斷 | 13/13 | 含中英文「完成」「索取金鑰」「接下來我會」「要我繼續嗎」「Remaining: …」「I will fix those…」 |
+**Luna 用哪把金鑰**（`src/router.js` 的 `decisionKeyFor`；變數來源與順序見上節「API keys」）：
 
-另以真 proxy＋真 luna＋模擬上游端到端實測：模型回「前兩個模組已遷移完成，剩下三個模組我之後再處理。」（規則未命中）→ luna `in_progress 0.61` → 自動續跑一次、effort LOW → MEDIUM，客戶端只看到一個完整 turn。
+1. `LUNA_API_KEY`；
+2. 否則 `OPENAI_API_KEY`；
+3. 否則（`LUNA_USE_CLIENT_KEY=on`，預設）客戶端自己送的 `Authorization: Bearer sk-…`（不接受 `sk-or-`）；
+4. 都沒有 → 每次決策改用規則，`serve` 啟動時會提示。
 
-終端機輸出範例：
+**ChatGPT 登入不能用來付 Luna 的費用。** Codex 以 ChatGPT 登入時，它送出的是 JWT 或 `chatgpt-account-id`，這些不會用於 Decisions API。請設定 `OPENAI_API_KEY`。
 
-```
-Luna  LOW  ✓ APPLIED
-     Step 2 · next 1 generation(s) · 215 ms · routine verify; luna low 0.52; stuck 0.20
-Luna  RESUME #1 → MEDIUM  ✓ APPLIED
-     Step 2 · unfinished 0.61 · luna · luna done 0.76, in progress 0.61
-```
+**主模型上游**（`src/proxy.js` 的 `upstreamBase`）：`LUNA_UPSTREAM` 有設定時固定使用；否則 ChatGPT 登入 → `https://chatgpt.com/backend-api/codex`；`sk-or-` 金鑰 → `https://openrouter.ai/api/v1`；其他 → `https://api.openai.com/v1`。
+
+**失敗時的暫停**（`src/decisions.js`）：逾時暫停 Luna 30 秒；401／403 暫停 10 分鐘；429 依 `Retry-After`，無此標頭則 60 秒。暫停期間直接用規則，不會每個 generation 都等逾時。暫停以 `LUNA_DECISION_URL` 為單位，所有金鑰共用。API 若以含 "cache" 字樣的 400 拒絕 explicit cache，程式自動改用 implicit 重試，之後不再送 explicit。
+
+**送給 Luna 的內容**：新 turn 送需求前 2000 字；turn 中送步驟描述與最近 8 步（指令前 160 字）；收工判斷送收尾文字末 800 字。預設送到 OpenAI。若 `LUNA_DECISION_URL` 指向其他位址，這些文字與金鑰也會送到該處。
 
 ## 安裝與使用
 
-需求：Node.js ≥ 22.15（零依賴）、Codex CLI 或任一 Chat Completions 客戶端；本機 luna 需 `git` 與 `uv`（選用但建議）。
-
 ```powershell
-git clone https://github.com/stevenke1981/luna-decision-openai.git
-cd luna-decision-openai                # 一定要在這個資料夾執行 npm link
-npm link                   # 必做：註冊全域指令 luna-decision-openai（或改用 node bin/luna.js ...）
-luna-decision-openai --version
-luna-decision-openai setup             # 安裝本機 luna（見上節；已有 luna-deploy 用 --dir）
-luna-decision-openai install           # 寫入 $CODEX_HOME/luna.config.toml（預設 ~/.codex）
-```
-
-`install` 寫入的 Codex profile：`model = "gpt-6.1-terra"`、`model_reasoning_effort = "medium"`、`luna` provider 指向 `http://127.0.0.1:8790/v1`、`wire_api = "responses"`、`requires_openai_auth = true`（沿用 Codex 既有登入）。檔案若存在且不是本工具寫入的，會拒絕覆寫，需加 `--force`。
-
-```powershell
-# A. 一鍵：背景啟動 proxy，再執行 codex -p luna
-luna-decision-openai codex
+luna-decision-openai install           # writes $CODEX_HOME\luna.config.toml
+luna-decision-openai codex             # starts the proxy if needed, then: codex -p luna
 luna-decision-openai codex exec "implement the plan in TODO.md and make the tests pass"
 
-# B. 即時看決策：開兩個視窗
-luna-decision-openai serve             # 視窗 1
-codex -p luna           # 視窗 2
+# live view: two windows
+luna-decision-openai serve             # window 1
+codex -p luna                          # window 2
 ```
+
+`install` 寫入的 profile 包含：`model = "gpt-6.1-terra"`（或 `--model` 指定者）、`model_reasoning_effort = "medium"`（`LUNA_DEFAULT_EFFORT`）、`model_provider = "luna"`，以及指向 `http://127.0.0.1:8791/v1`、`wire_api = "responses"`、`requires_openai_auth = true` 的 `[model_providers.luna]`。驗證行依 `--provider` 而定：`chatgpt` 寫入 `requires_openai_auth = true`（沿用 Codex 既有的登入）；`openai` 寫入 `env_key = "OPENAI_API_KEY"`；`openrouter` 寫入 `env_key = "OPENROUTER_API_KEY"`。`install --global` 寫入的 provider 表也使用同一行。檔案存在且不是本工具寫入時會拒絕覆寫，需加 `--force`。
+
+`codex` 子指令會把 `--model` 同時傳給 Codex 的 `-m`。若 proxy 已在執行，請求中的其他已知模型 id（例如 `gpt-6.1-sol`）會原樣轉送，只改 effort。
+
+### 指令
 
 | 指令 | 用途 |
 |---|---|
-| `luna-decision-openai serve` | 前景執行 proxy（預設 `127.0.0.1:8790`） |
-| `luna-decision-openai setup [--dir D]` | 安裝 luna-deploy（clone、`uv sync --extra model`、下載 checkpoint） |
-| `luna-decision-openai install [--force]` | 寫入 `luna` profile |
-| `luna-decision-openai install --global` | 另把 luna-decision-openai 設為 `config.toml` 的預設 provider（給 Codex 桌面版／IDE 擴充） |
-| `luna-decision-openai uninstall` | 還原 `config.toml`、移除本工具寫的 profile |
-| `luna-decision-openai codex [args...]` | 必要時啟動 proxy，再執行 `codex -p luna [args...]` |
-| `luna-decision-openai tail` | 即時追蹤決策（讀 `decisions.jsonl`） |
-| `luna-decision-openai stats` | 依 effort 分組統計 generation、reasoning tokens 與續跑次數 |
-| `luna-decision-openai status` | 顯示執行中 proxy 的版本；過舊或未執行時 exit 1 |
-| `luna-decision-openai stop` | 停止執行中的 proxy（只停 `app` 為 `luna-decision-openai` 者） |
-| `luna-decision-openai --version` | 磁碟上程式碼的版本與 build |
+| `luna-decision-openai serve [--model M] [--effort E]` | 前景執行 proxy 並即時顯示決策。若埠已有本專案的 proxy，改為追蹤它的決策，不另起一個 |
+| `luna-decision-openai install [--model M] [--effort E] [--provider P] [--force]` | 寫入 `$CODEX_HOME\luna.config.toml`（profile `luna`）。`--provider chatgpt`（預設）、`openai`（`OPENAI_API_KEY`）或 `openrouter`（`OPENROUTER_API_KEY`）決定主模型的驗證方式，見「API keys」 |
+| `luna-decision-openai install --global` | 另把 luna-decision-openai 設為 `config.toml` 的預設 provider（給桌面版與 IDE 擴充；見下節） |
+| `luna-decision-openai uninstall` | 還原 `config.toml` 並刪除 profile 檔（`config.toml.luna-decision-openai.bak` 保留） |
+| `luna-decision-openai codex [--model M] [args...]` | 必要時背景啟動 proxy，再執行 `codex -p luna [args...]` |
+| `luna-decision-openai models` | 列出已知主模型（`*` 為預設）與 effort 階梯 |
+| `luna-decision-openai probe [text]` | 實際呼叫一次 `gpt-6-luna`，印出回答、換算的 effort、耗時、輸入 tokens 與費用上限。只使用 `OPENAI_API_KEY` 或 `LUNA_API_KEY`，不使用客戶端金鑰 |
+| `luna-decision-openai tail` | 即時追蹤決策 |
+| `luna-decision-openai stats` | 依 effort 統計 generation 數、平均 reasoning tokens 與輸出 tokens；列出續跑次數與 Luna 費用上限 |
+| `luna-decision-openai status` | 顯示執行中 proxy 的版本與 build；未執行或版本過舊時 exit 1 |
+| `luna-decision-openai stop` | 停止執行中的 proxy（只停 `/luna/health` 回報 app 為 `luna-decision-openai` 的程序） |
+| `luna-decision-openai --version` | 磁碟上程式碼的版本與 build（也接受 `-v`） |
+
+`--model M`、`--effort E`、`--provider P`（也接受 `--model=M` 等形式）可用於 `serve`、`install`、`codex`、`models`、`probe`、`status`。
+
+更新程式碼後請重啟 proxy：`status` 會回報 stale，此時執行 `stop` 再重新 `serve` 或 `codex`。
+
+### 決策顯示格式（示意，數值為舉例）
+
+```
+Luna  HIGH  SELECTED
+     id: 3f2c… · Step 2 · source: luna · luna: high, heuristic: medium · next 1 generation(s) · 180 ms · luna high (score 1.40, confidence 0.62); stuck 0.20
+Luna  RESUME #1 → MEDIUM  ✓ APPLIED
+     Step 3 · unfinished 0.61 · source: luna · luna done 0.20, in progress 0.61 · …
+```
+
+決策行標示 `SELECTED`；續跑行標示 `RESUME #n → 級別  ✓ APPLIED`。`LUNA_QUIET=1` 會隱藏這些輸出（不影響紀錄檔）。
 
 ### Codex 桌面版與 IDE 擴充
 
-桌面版與 IDE 擴充無法帶 `-p`，只讀主設定檔 `$CODEX_HOME/config.toml`，故需 `--global`：
+桌面版與 IDE 擴充不能使用 `-p`，只讀 `$CODEX_HOME\config.toml`，因此需要 `--global`：
 
 ```powershell
-luna-decision-openai install --global  # 第一次會備份成 config.toml.luna-decision-openai.bak
-luna-decision-openai serve             # 保持開著；桌面版不會替你啟動 proxy
-# 重開 Codex 桌面版，送一個請求；serve 視窗出現「Luna MEDIUM ✓ APPLIED」即表示已經過 proxy
-luna-decision-openai uninstall         # 還原
+luna-decision-openai install --global  # 首次會備份成 config.toml.luna-decision-openai.bak
+luna-decision-openai serve             # keep it running; the desktop app does not start the proxy
+luna-decision-openai uninstall         # restores config.toml
 ```
 
-`--global` 在 `config.toml` 最前面加入 `model_provider`、`model`、`model_reasoning_effort`，檔尾加入 `[model_providers.luna]`，皆夾在 `# >>> luna-decision-openai` 與 `# <<< luna-decision-openai` 標記之間；原本的同名頂層設定改為 `# luna-decision-openai saved: …` 註解，`uninstall` 逐字還原。注意：之後**所有** Codex 用戶端（含直接打 `codex`）都經過 proxy，proxy 沒開即連線失敗。桌面版若改走 websocket 傳輸，請求不經過 proxy（serve 視窗不會出現決策）——**桌面版尚未實測**。
+`--global` 在 `config.toml` 最前面加入 `model_provider`、`model`、`model_reasoning_effort`，並在檔尾加入 `[model_providers.luna]`。這些行夾在 `# >>> luna-decision-openai` 與 `# <<< luna-decision-openai` 標記之間。原本的同名頂層設定改為 `# luna-decision-openai saved: …` 註解，`uninstall` 會逐行還原。
 
-**更新後請重啟 proxy**（`git pull` 後 `luna-decision-openai stop`）。`/luna/health` 回報 `app`、`version`、`build`、`pid`、`startedAt`、`mode`、`ladder` 與 `stats`（含 `byEffort`、`continued`、`nudged`）。`decisions.jsonl` 每筆另有 `nudged: true` 與 `continues: [{n, effort, unfinished, source, reasons}]`（有發生時）。
+注意：之後**所有** Codex 客戶端（包括直接執行的 `codex`）都會經過 proxy，proxy 沒開就連不上。proxy 只處理 HTTP，若桌面版改走 websocket 傳輸，請求不會經過 proxy。桌面版尚未實測。
 
-`luna-decision-openai serve` 在已有新版 proxy 執行時追蹤 `events.jsonl`：決策選定後立即顯示 Luna 與規則的建議、採用來源及工作階段調整；完成或失敗事件以同一 ID 對照。`decisions.jsonl` 仍保存完成後的統計紀錄。舊 proxy 使用原有紀錄檔，且只在回應後顯示。
+### Chat Completions 客戶端
 
-**上游與憑證**：`LUNA_UPSTREAM` 強制指定；ChatGPT 登入（JWT 或 `chatgpt-account-id`）→ `chatgpt.com/backend-api/codex`；`sk-or-` 金鑰 → `openrouter.ai/api/v1`；其他 → `api.openai.com/v1`。proxy 不寫入任何憑證到記錄；送給 luna 的只有需求前 800 字、一句步驟描述或收尾文字末 500 字，預設送往本機 luna；若改 `LUNA_DECISION_URL` 指向他處，這些文字與 `LUNA_API_KEY` 也會送往該處。
+proxy 同時代理 `POST /v1/chat/completions`。請求帶有 `reasoning_effort` 字串或 `reasoning` 物件時套用 effort；`luna-auto`／`auto` 別名會改寫為設定的模型，OpenRouter 的 `sk-or-` 金鑰會自動走 OpenRouter。計畫提醒適用，續跑不適用。
 
-## Chat Completions 客戶端
-
-proxy 也代理 `POST /v1/chat/completions`。opencode、aider、crush 把 base URL 指到 `http://127.0.0.1:8790/v1`，model 設 `luna-auto`。effort 路由與計畫提醒都適用；**自動續跑目前只支援 Responses 串流**（Codex）。
+以下為 opencode 設定範例（未實測）：
 
 ```json
 {
@@ -180,86 +281,110 @@ proxy 也代理 `POST /v1/chat/completions`。opencode、aider、crush 把 base 
     "luna": {
       "npm": "@ai-sdk/openai-compatible",
       "name": "luna-decision-openai",
-      "options": { "baseURL": "http://127.0.0.1:8790/v1", "apiKey": "{env:OPENAI_API_KEY}" },
+      "options": { "baseURL": "http://127.0.0.1:8791/v1", "apiKey": "{env:OPENAI_API_KEY}" },
       "models": { "luna-auto": { "name": "GPT-6.1 Terra (luna effort)" } }
     }
   }
 }
 ```
 
-```powershell
-# OPENAI_API_KEY 原樣轉給上游；sk-or- 開頭的 OpenRouter 金鑰會自動走 OpenRouter
-aider --openai-api-base http://127.0.0.1:8790/v1 --model openai/luna-auto
-```
+aider 範例（未實測）：`aider --openai-api-base http://127.0.0.1:8791/v1 --model openai/luna-auto`
+
+### Windows 沙箱提示
+
+建議在專案資料夾內啟動 Codex，不要在家目錄（例如 `C:\Users\<你>`）下啟動。本專案未在家目錄情境下實測。
 
 ## 設定（環境變數）
 
+預設值取自 `src/config.js` 與 `bin/luna.js`。非法值會在啟動時報錯。所有 CLI 指令啟動時都會先讀取 `.env.local`／`.env`（順序見「API keys」），系統環境變數優先。
+
 | 變數 | 預設 | 說明 |
 |---|---|---|
-| `LUNA_PORT` / `LUNA_HOST` | `8790` / `127.0.0.1` | 監聽位址 |
-| `LUNA_MODEL` | `gpt-6.1-terra` | 唯一的上游模型 id |
-| `LUNA_AUTO_MODELS` | `luna-auto,auto` | 會改寫成上述 id 的客戶端 model 名稱 |
-| `LUNA_LEVELS` | `low,medium,high,xhigh` | effort 階梯（亦即 luna 的選項） |
-| `LUNA_DEFAULT_EFFORT` | `medium` | 新 turn 起點（規則），也是續跑後的下限；須在階梯內 |
-| `LUNA_MODE` | `luna` | `luna`、`heuristic`（只用規則）、`llm`（小模型判官）、`off`（純轉送） |
-| `LUNA_DECISION_URL` | `http://127.0.0.1:8100/api/alpha/decisions` | luna-deploy Decisions API |
-| `LUNA_DECISION_MODEL` | `multilingual` | luna checkpoint（`multilingual`、`english`、`auto`）；也是自動啟動時預先載入者 |
-| `LUNA_AUTOSTART` | `on` | serve 時若本機 luna 沒在跑就啟動它 |
-| `LUNA_DEPLOY_DIR` | `~/.luna-decision-openai/luna-deploy`（或 `setup --dir` 記住的路徑） | luna-deploy checkout |
-| `LUNA_DEPLOY_PYTHON` | checkout 的 `.venv` Python | 改用其他 Python 啟動 luna-deploy |
-| `LUNA_API_KEY` | — | luna-deploy 設了 `LUNA_DEPLOY_API_KEY` 時填同值 |
-| `LUNA_DECISION_TIMEOUT_MS` | `2000` | 單次 luna 決策逾時（至少 1）；逾時後暫停 luna 30 秒 |
-| `LUNA_MIN_CONFIDENCE` | `0.5` | luna 最高機率低於此值即棄權，改用規則 |
-| `LUNA_CONTINUE` | `on` | 提早收工自動續跑 |
+| `LUNA_PORT` | `8791` | 監聽埠 |
+| `LUNA_HOST` | `127.0.0.1` | 監聽位址 |
+| `LUNA_MODEL` | `gpt-6.1-terra` | 主模型 id；`luna-auto` 別名與此 id 會改寫為它（`--model` 設定同一個值） |
+| `LUNA_MODELS` | 空 | 額外的主模型 id（逗號分隔），會列在 `models` 中 |
+| `LUNA_AUTO_MODELS` | `luna-auto,auto` | 會交由 router 改寫為 `LUNA_MODEL` 的客戶端模型名稱 |
+| `LUNA_LEVELS` | `low,medium,high,xhigh,max` | effort 階梯，必須由低到高、不可重複，也是 Luna 的選項 |
+| `LUNA_DEFAULT_EFFORT` | `medium` | 新 turn 的規則預設、續跑後的下限；必須在階梯內（`--effort` 設定同一個值） |
+| `LUNA_MODE` | `luna` | `luna`；`heuristic`（只用規則，不呼叫 Luna）；`llm`（以 `LUNA_JUDGE_MODEL` 或主模型做判官，只在 Responses 第 2 步起）；`off`（不改 effort，只改別名模型） |
+| `LUNA_DECISION_URL` | `https://api.openai.com/v1/decisions` | Decisions API 端點 |
+| `LUNA_DECISION_MODEL` | `gpt-6-luna` | 決策模型 |
+| `LUNA_API_KEY` | 空 | 決策用金鑰，優先於 `OPENAI_API_KEY` |
+| `OPENAI_API_KEY` | 空 | Luna 決策的金鑰（`probe` 只用這個或 `LUNA_API_KEY`）；`--provider openai` 時也是主模型的金鑰 |
+| `OPENROUTER_API_KEY` | 空 | `--provider openrouter` 時主模型的金鑰（`sk-or-`）。Luna 仍需 `OPENAI_API_KEY` |
+| `LUNA_USE_CLIENT_KEY` | `on` | 無上述金鑰時，使用客戶端的 `sk-` 金鑰（`off` 關閉） |
+| `OPENAI_ORG_ID`（或 `OPENAI_ORGANIZATION`） | 空 | 送出 `openai-organization` 標頭 |
+| `OPENAI_PROJECT_ID`（或 `OPENAI_PROJECT`） | 空 | 送出 `openai-project` 標頭 |
+| `LUNA_DECISION_TIMEOUT_MS` | `3000` | 單次決策逾時（至少 1）；逾時後暫停 Luna 30 秒 |
+| `LUNA_CACHE` | `explicit` | `explicit`：rubric 標記 cache breakpoint 並送 `prompt_cache_options`；`implicit`：不標 breakpoint，只送 `prompt_cache_key`；`off`：不送任何快取欄位 |
+| `LUNA_MIN_CONFIDENCE` | `0.4` | Luna 信心低於此值即棄權，改用規則 |
+| `LUNA_EFFORT_QUANTILE` | `0.5` | 取 Luna 機率分布的哪個分位數作為級別；越高越偏向較高 effort |
+| `LUNA_CONTINUE` | `on` | 提早收工時自動續跑（僅 Responses 串流） |
 | `LUNA_MAX_CONTINUES` | `5` | 每個 turn 最多續跑次數 |
-| `LUNA_CONTINUE_THRESHOLD` | `0.6` | `unfinished` 達此值才續跑 |
-| `LUNA_NUDGE` | `on` | 計畫有未完成步驟時附加提醒 |
-| `LUNA_JUDGE_MODEL` / `LUNA_JUDGE_EFFORT` / `LUNA_JUDGE_TIMEOUT_MS` | 請求模型 / `low` / `2500` | `llm` 判官 |
-| `LUNA_UPSTREAM`、`LUNA_CHATGPT_UPSTREAM`、`LUNA_API_UPSTREAM`、`LUNA_OPENROUTER_UPSTREAM` | 依憑證 | 上游 |
-| `LUNA_HOME` | `~/.luna-decision-openai` | `decisions.jsonl`、`proxy.log` |
-| `LUNA_QUIET` | — | `1` 則不印決策 |
-| `CODEX_HOME` | `~/.codex` | `install` 寫入目錄 |
+| `LUNA_CONTINUE_THRESHOLD` | `0.6` | `unfinished` 達此值才續跑（0–1） |
+| `LUNA_NUDGE` | `on` | 計畫有未完成步驟時於請求末端附加提醒 |
+| `LUNA_JUDGE_MODEL` | 空（沿用請求的模型，routed 時為主模型） | `LUNA_MODE=llm` 的判官模型 |
+| `LUNA_JUDGE_EFFORT` | `low` | 判官的 effort |
+| `LUNA_JUDGE_TIMEOUT_MS` | `2500` | 判官逾時 |
+| `LUNA_PROVIDER` | `chatgpt` | `chatgpt`、`openai` 或 `openrouter`：`install` 寫入的主模型驗證方式（`--provider` 設定同一個值） |
+| `LUNA_UPSTREAM` | 空 | 固定主模型上游；設定後忽略憑證判斷 |
+| `LUNA_CHATGPT_UPSTREAM` | `https://chatgpt.com/backend-api/codex` | ChatGPT 登入的上游 |
+| `LUNA_API_UPSTREAM` | `https://api.openai.com/v1` | API 金鑰的上游 |
+| `LUNA_OPENROUTER_UPSTREAM` | `https://openrouter.ai/api/v1` | `sk-or-` 金鑰的上游 |
+| `LUNA_HOME` | `~/.luna-decision-openai` | 紀錄檔與 `proxy.log` 所在位置 |
+| `LUNA_QUIET` | 未設定 | `1` 時不在終端機印出決策 |
+| `CODEX_HOME` | `~/.codex` | `install`、`uninstall`、`install --global` 寫入的目錄（CLI 讀取，非 `config.js`） |
+
+## 紀錄檔與統計
+
+位於 `LUNA_HOME`（預設 `~/.luna-decision-openai`）：
+
+- `decisions.jsonl`：每個 routed generation 在回應結束後寫入一行，包含 `ts`、`session`、`api`、`step`、`effort`、`from`、`hold`、`reasons`、`source`、`cost`、`ms`、`model`、`requested`、`usage`、`status`，視情況另有 `suggestions`（Luna 與規則各自建議）、`adjustment`、`nudged`、`continues`。`stats` 讀的是這個檔。
+- 只改模型的 `luna-auto` 請求（沒有 reasoning 參數）不呼叫 Luna，`source` 為 `model only`，effort 不套用。
+- `events.jsonl`：決策選定時寫入一行 `decision`，完成或失敗時寫入 `completed`／`failed`，以同一 `id` 對應。`tail` 在此檔存在時讀它，否則讀 `decisions.jsonl`；新版 proxy 的 `serve` 追蹤的也是此檔。
+- `proxy.log`：`codex` 子指令背景啟動的 proxy 的輸出。
+
+`/luna/health` 回報 `app`、`version`、`build`、`pid`、`startedAt`、`mode`、`model`、`ladder`、`decisionModel` 與 `stats`（`requests`、`routed`、`byEffort`、`reasoningTokens`、`continued`、`nudged`）。
 
 ## 架構
 
 | 檔案 | 職責 |
 |---|---|
-| `src/config.js` | 環境變數與驗證 |
-| `src/decisions.js` | luna 決策：`effortCall()`／`situation()`（state 與問題）、`lunaDecide()`、`combineEffort()`（把關）、`lunaStopCheck()` |
-| `src/policy.js` | 規則判斷 `assess()`、hysteresis `nextState()` |
-| `src/router.js` | 依 session 保存 effort 狀態與本輪續跑次數（`continuesOf`、`noteContinue`） |
-| `src/longtask.js` | 計畫解析 `turnPlan()`、`finalOutput()`、規則版停止判斷 `assessStop()`、提醒與續跑訊息 |
-| `src/splice.js` | SSE 事件切分、暫扣 `response.completed`、把續跑回應接在同一串流 |
-| `src/trajectory.js` / `src/chat.js` | Responses／Chat 軌跡解析 |
-| `src/judge.js` | 選用的 LLM 判官 |
-| `src/model.js` | 模型 id、`luna-auto` 別名、effort 對齊 |
-| `src/proxy.js` | HTTP proxy：解壓、改寫、提醒、續跑、usage、`/luna/health` |
-| `src/log.js` / `src/version.js` | 決策記錄與格式；版本與 build 指紋 |
+| `src/config.js` | 環境變數、預設值與驗證 |
+| `src/decisions.js` | Luna 決策：`effortCall()`、`situation()`、`requestBody()`（rubric 與快取欄位）、`toAssessment()`、`combineEffort()`（把關）、`lunaStopCheck()`、暫停與 explicit cache 退回 |
+| `src/policy.js` | 規則 `assess()` 與升降級 `nextState()` |
+| `src/router.js` | 金鑰選擇 `decisionKeyFor()`、各 session 的 effort 狀態與續跑次數 |
+| `src/longtask.js` | 計畫解析 `turnPlan()`、收尾文字 `finalOutput()`、規則版收工判斷 `assessStop()`、提醒與續跑訊息 |
+| `src/splice.js` | SSE 切分、暫扣 `response.completed`、把續跑回應接在同一條串流上 |
+| `src/trajectory.js`、`src/chat.js` | Responses 與 Chat Completions 的軌跡解析 |
+| `src/judge.js` | `LUNA_MODE=llm` 的判官 |
+| `src/model.js` | 模型 id、`luna-auto` 別名、effort 對齊（`minimal` → `low`） |
+| `src/proxy.js` | HTTP proxy：解壓、改寫、提醒、續跑、紀錄、`/luna/health` |
+| `src/codexconfig.js` | `install --global` 對 `config.toml` 的可逆編輯 |
+| `src/log.js`、`src/version.js` | 決策格式與紀錄；版本與 build 指紋 |
 | `bin/luna.js` | CLI |
-| `scripts/luna-eval.mjs` | 對執行中的 luna 量測上述問法（含把關） |
+
+## 已驗證事項
+
+- **Live Decisions 呼叫（2026-10-29）**：`luna-decision-openai probe` 對 `gpt-6-luna` 呼叫成功，API 接受 explicit cache breakpoint（請求形狀：rubric 的 `prompt_cache_breakpoint`、`prompt_cache_options`、`prompt_cache_key`，state 為 `input_json`）。首次呼叫後，約 1.45k 輸入 tokens 中有 1236 個為快取命中。暖機後延遲 400–700 ms，首次冷啟動約 2 秒。單次決策費用不超過 $0.00015（以未快取價計算的上限）。
+- CLI（臨時目錄）：`--version`、`models`、`install`（含 `--model`、`--effort`）、`install --global` 與 `uninstall` 的產物與還原已核對；無金鑰的 `probe` 會明確報錯並以 exit 1 結束。
 
 ## 限制與未驗證事項
 
-- **未驗證**：未以真實 Codex＋GPT-6.1 Terra 長任務實測；Codex 桌面版（`install --global`）未實測；`luna-decision-openai setup` 的全新安裝路徑（git clone＋uv sync 約 3 GB）未實跑，自動啟動／停止則已以既有 checkout 實測；續跑串流以本機模擬上游驗證（同 jev-gpt）。
-- luna 實測案例僅 29 則，皆為短句；長篇、混雜程式碼的收尾文字之準確度未量測。請以 `luna-decision-openai stats` 與 `decisions.jsonl` 在自身工作量觀察，必要時調 `LUNA_CONTINUE_THRESHOLD`、`LUNA_MIN_CONFIDENCE`。
-- 困難需求 luna 常信心不足而棄權（實測 0.37–0.40），此時由關鍵字規則決定。
-- 回傳給客戶端的 `usage` 只含最後一個回應；續跑那一代的 tokens 也算在上游帳單裡。
-- 停止判斷取 luna 與規則之大者：收尾若是請使用者核可（"I need your approval to continue"）而 luna 判為 in progress，仍可能續跑；續跑上限 `LUNA_MAX_CONTINUES` 為最後防線。
+- **未實測：** Codex 桌面版（`install --global`）、websocket 傳輸、長任務端到端效果，以及 `max` 與 `gpt-6.1-sol`、`gpt-6-astra` 的 effort 支援。程式只把 `minimal` 對應為 `low`，其餘 effort 原樣送出。
+- 本 repo 目前沒有 Luna 效果量測腳本。預設門檻（`LUNA_MIN_CONFIDENCE` 0.4、`LUNA_CONTINUE_THRESHOLD` 0.6、`LUNA_MAX_CONTINUES` 5、`LUNA_DECISION_TIMEOUT_MS` 3000）尚未以真實工作量調校。量測時請看 `stats` 與 `decisions.jsonl`。
+- Luna 只收到結構化摘要（請求、步驟摘要、最近 8 步、收尾文字末 800 字），不會收到完整對話。
+- 規則的困難需求偵測是關鍵字比對，有漏判與誤判的可能。
+- 續跑的那一代同樣計入上游帳單。`decisions.jsonl` 的 `usage` 是 proxy 所見的最後一個 usage（續跑情況未實測）。
 - Chat Completions 不續跑；Codex 的 websocket 傳輸不經過 proxy。
 
-## 測試
+## 測試與變更歷史
 
 ```powershell
-npm test                          # node --test；不連網路，上游與 luna 皆以本機 http.createServer 模擬
-node scripts/luna-eval.mjs        # 需執行中的 luna：量測 effort 與停止判斷
+npm test     # node --test (test/)
 ```
 
-## 變更歷史
-
-| 版本 | 日期 | 內容 | 影響範圍 |
-|------|------|------|----------|
-| v0.1.0 | 2026-10-29 | 初始建立（衍生自 jev-gpt 871082f）：決策改由本機 luna（decision mode、choice 問題、規則把關）、預設 GPT-6.1 Terra medium、luna 選 low～xhigh、續跑上限 5、第一人稱承諾規則、CLI `luna-decision-openai`（埠 8790、profile `luna`） | 全部 |
-| v0.1.1 | 2026-10-29 | 依獨立審查修正：句尾條件式提議（"I'll add docs if you want"、「你想要的話我會改」）不再算承諾；承諾規則改為有界視窗（避免長文字二次方耗時）；luna 逾時後暫停 30 秒；`LUNA_DECISION_TIMEOUT_MS` 須 ≥ 1；README 更正 | `longtask.js`、`decisions.js`、`config.js`、README |
-| v0.2.0 | 2026-10-29 | `install --global`：改寫 `config.toml`（可逆、自動備份）讓 Codex 桌面版／IDE 擴充也經過 proxy；新增 `uninstall` | `bin/luna.js`、`src/codexconfig.js`、README |
-| v0.3.0 | 2026-10-29 | 整合 luna-deploy：`luna-decision-openai setup` 安裝、`serve` 自動啟動（預載所用 checkpoint）、`stop` 一併停止、`status` 顯示 luna；預設 checkpoint 改為 multilingual；停止判斷加「end 確定已完成則忽略 work」把關 | `src/lunaserver.js`、`bin/luna.js`、`src/config.js`、`src/decisions.js`、README |
-| v0.3.1 | 2026-10-29 | README：新增「快速開始」，強調 clone 後須先 `npm link`、列出 git／uv 前置需求、`setup --dir` 指定安裝位置與指令找不到時的排解 | README |
+| 版本 | 內容 |
+|---|---|
+| v0.1.0 | 初始建立：決策改由 OpenAI `gpt-6-luna`（Decisions API）；主模型預設 `gpt-6.1-terra`，可選 `gpt-6.1-sol`、`gpt-6-astra`；effort 階梯 `low`～`max`；規則把關與續跑；CLI `luna-decision-openai`（埠 8791、profile `luna`） |
