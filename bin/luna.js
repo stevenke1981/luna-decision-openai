@@ -11,7 +11,8 @@ import { decisionOptions } from '../src/router.js';
 import { createProxy } from '../src/proxy.js';
 import { formatDecision, readDecisions, usageTokens } from '../src/log.js';
 import { VERSION, BUILD, APP, isOurProxy, compareBuild } from '../src/version.js';
-import { addGlobal, removeGlobal, hasGlobal } from '../src/codexconfig.js';
+import { addGlobal, removeGlobal, hasGlobal, authLine } from '../src/codexconfig.js';
+import { loadEnvFiles } from '../src/envfile.js';
 
 const NAME = APP;
 // Codex profile name; `codex -p luna` selects the provider written by `install`.
@@ -23,7 +24,9 @@ generation by OpenAI's Luna Decisions model (gpt-6-luna, billed to your API key)
 Usage:
   ${NAME} serve [--model M] [--effort E]   Run the proxy in the foreground (shows live decisions)
                                 (opencode/aider/crush: base URL http://127.0.0.1:8791/v1, model luna-auto)
-  ${NAME} install [--model M] [--effort E] [--force]   Write the "${PROFILE}" Codex profile ($CODEX_HOME/${PROFILE}.config.toml)
+  ${NAME} install [--model M] [--effort E] [--provider P] [--force]   Write the "${PROFILE}" Codex profile
+                                ($CODEX_HOME/${PROFILE}.config.toml); P = chatgpt (Codex login, default),
+                                openai (OPENAI_API_KEY) or openrouter (OPENROUTER_API_KEY) for the main model
   ${NAME} install --global   Also make ${NAME} the default in $CODEX_HOME/config.toml, for the Codex desktop app
                                 and IDE extensions (they cannot pass -p); "${NAME} serve" must be running
   ${NAME} uninstall          Undo install: restore config.toml and remove the profile
@@ -38,8 +41,10 @@ Usage:
 
 Main models: gpt-6.1-terra (default), gpt-6.1-sol, gpt-6-astra (more with LUNA_MODELS)
 
-Environment:
+Environment (also read from .env.local / .env in the project folder or LUNA_HOME; see .env.example):
   OPENAI_API_KEY or LUNA_API_KEY  the key Luna calls are billed to (else a client's own sk- key)
+  OPENROUTER_API_KEY  the main model's key with --provider openrouter (Luna still needs an OpenAI key)
+  LUNA_PROVIDER (chatgpt|openai|openrouter)
   LUNA_PORT (8791)  LUNA_MODEL (gpt-6.1-terra)  LUNA_LEVELS (low,medium,high,xhigh,max)  LUNA_DEFAULT_EFFORT (medium)
   LUNA_MODE (luna|heuristic|llm|off)  LUNA_DECISION_MODEL (gpt-6-luna)  LUNA_DECISION_TIMEOUT_MS (3000)
   LUNA_MIN_CONFIDENCE (0.4)  LUNA_EFFORT_QUANTILE (0.5)  LUNA_CACHE (explicit|implicit|off)  LUNA_USE_CLIENT_KEY (on|off)
@@ -60,7 +65,7 @@ model_reasoning_effort = "${config.defaultEffort}"
 name = "Luna Decision OpenAI"
 base_url = "http://${config.host}:${config.port}/v1"
 wire_api = "responses"
-requires_openai_auth = true
+${authLine(config.provider)}
 `;
 }
 
@@ -204,6 +209,9 @@ function serve(config) {
     console.log(`${NAME} v${VERSION} (build ${BUILD}) listening on http://${config.host}:${config.port}/v1  `
       + `mode=${config.mode} model=${config.model} default=${config.defaultEffort} ladder=${config.ladder.join('→')} `
       + `continue=${config.continueTurns ? `on (max ${config.maxContinues})` : 'off'} nudge=${config.nudge ? 'on' : 'off'}`);
+    if (config.provider === 'openrouter' && !process.env.OPENROUTER_API_KEY) {
+      console.log(`${NAME}: provider openrouter but OPENROUTER_API_KEY is not set; Codex will have no key to send`);
+    }
     if (config.mode === 'luna' && !config.decisionKey) {
       console.log(`${NAME}: no OPENAI_API_KEY or LUNA_API_KEY; Luna uses a client's own sk- key when it sends one, `
         + 'otherwise decisions use the rules');
@@ -342,7 +350,7 @@ function stats(config) {
 // any proxy it starts; the rest of the arguments are returned untouched.
 function takeOptions(args, env = process.env) {
   const rest = [];
-  const names = { '--model': 'LUNA_MODEL', '--effort': 'LUNA_DEFAULT_EFFORT' };
+  const names = { '--model': 'LUNA_MODEL', '--effort': 'LUNA_DEFAULT_EFFORT', '--provider': 'LUNA_PROVIDER' };
   for (let i = 0; i < args.length; i++) {
     const [flag, inline] = args[i].split(/=(.*)/s);
     const name = names[flag];
@@ -386,7 +394,10 @@ async function probeLuna(config, words) {
 async function main() {
   const [cmd, ...args] = process.argv.slice(2);
   const rest = ['serve', 'install', 'codex', 'models', 'probe', 'status'].includes(cmd) ? takeOptions(args) : args;
+  // Keys from .env.local / .env (project folder, then LUNA_HOME); the shell's own variables win.
+  const envFiles = loadEnvFiles();
   const config = loadConfig();
+  if (cmd === 'serve') envFiles.forEach(({ file, keys }) => console.log(`${NAME}: loaded ${keys.join(', ') || 'nothing new'} from ${file}`));
   switch (cmd) {
     case 'serve': return serve(config);
     case 'install': return install(config, rest.includes('--force'), rest.includes('--global'));

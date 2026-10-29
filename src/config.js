@@ -87,6 +87,9 @@ export function loadConfig(env = process.env) {
     continueThreshold: probabilityEnv(env, 'LUNA_CONTINUE_THRESHOLD', 0.6),
     nudge: switchEnv(env, 'LUNA_NUDGE', 'on'),
     mode,
+    // How the Codex profile authenticates the main model: the ChatGPT login, OPENAI_API_KEY or
+    // OPENROUTER_API_KEY. The proxy picks the upstream from the key the client sends.
+    provider: oneOf(env, 'LUNA_PROVIDER', 'chatgpt', ['chatgpt', 'openai', 'openrouter']),
     // Fixed upstream; when unset the auth type picks ChatGPT backend, OpenRouter or API.
     upstream: env.LUNA_UPSTREAM || '',
     chatgptUpstream: env.LUNA_CHATGPT_UPSTREAM || 'https://chatgpt.com/backend-api/codex',

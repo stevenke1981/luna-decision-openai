@@ -23,6 +23,21 @@ function join(lines, eol) {
   return lines.length ? lines.join(eol) + eol : '';
 }
 
+// How Codex authenticates to the proxy, which forwards it upstream: the ChatGPT login, or an
+// API key Codex reads from the named environment variable (sk- -> OpenAI, sk-or- -> OpenRouter).
+const AUTH = {
+  chatgpt: 'requires_openai_auth = true',
+  openai: 'env_key = "OPENAI_API_KEY"',
+  openrouter: 'env_key = "OPENROUTER_API_KEY"',
+};
+
+/** The provider-table line that sets how Codex authenticates for `provider`. */
+export function authLine(provider = 'chatgpt') {
+  const line = AUTH[provider];
+  if (!line) throw new Error(`unknown provider "${provider}"; use ${Object.keys(AUTH).join('|')}`);
+  return line;
+}
+
 /** Whether luna-decision-openai's block is in the config text. */
 export function hasGlobal(text) {
   return String(text ?? '').split(/\r?\n/).includes(BEGIN);
@@ -45,7 +60,7 @@ export function removeGlobal(text) {
  * Makes luna-decision-openai the default provider of a Codex config.toml. Running it again replaces
  * the earlier edit. Throws when the file defines its own [model_providers.luna].
  * @param {string} text the current config.toml ('' when there is none)
- * @param {{host:string, port:number, model:string, defaultEffort:string}} config
+ * @param {{host:string, port:number, model:string, defaultEffort:string, provider?:string}} config
  */
 export function addGlobal(text, config) {
   const { eol, lines } = splitLines(removeGlobal(text));
@@ -70,7 +85,7 @@ export function addGlobal(text, config) {
     'name = "Luna Decision OpenAI"',
     `base_url = "http://${config.host}:${config.port}/v1"`,
     'wire_api = "responses"',
-    'requires_openai_auth = true',
+    authLine(config.provider),
     END,
   ];
   return join([...head, ...top, ...lines.slice(topEnd), ...table], eol);
