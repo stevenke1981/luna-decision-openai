@@ -352,6 +352,11 @@ function takeOptions(args, env = process.env) {
   const rest = [];
   const names = { '--model': 'LUNA_MODEL', '--effort': 'LUNA_DEFAULT_EFFORT', '--provider': 'LUNA_PROVIDER' };
   for (let i = 0; i < args.length; i++) {
+    // Everything after `--` belongs to the command (codex), untouched.
+    if (args[i] === '--') {
+      rest.push(...args.slice(i));
+      break;
+    }
     const [flag, inline] = args[i].split(/=(.*)/s);
     const name = names[flag];
     if (!name) {
@@ -359,7 +364,7 @@ function takeOptions(args, env = process.env) {
       continue;
     }
     const value = inline ?? args[++i];
-    if (!value) throw new Error(`${flag} needs a value`);
+    if (!value || (inline == null && value.startsWith('-'))) throw new Error(`${flag} needs a value`);
     env[name] = value;
   }
   return rest;
@@ -397,7 +402,10 @@ async function main() {
   // Keys from .env.local / .env (project folder, then LUNA_HOME); the shell's own variables win.
   const envFiles = loadEnvFiles();
   const config = loadConfig();
-  if (cmd === 'serve') envFiles.forEach(({ file, keys }) => console.log(`${NAME}: loaded ${keys.join(', ') || 'nothing new'} from ${file}`));
+  for (const { file, error } of envFiles) if (error) console.error(`${NAME}: warning: cannot read ${file}: ${error}`);
+  if (cmd === 'serve') {
+    for (const { file, keys, error } of envFiles) if (!error) console.log(`${NAME}: loaded ${keys.join(', ') || 'nothing new'} from ${file}`);
+  }
   switch (cmd) {
     case 'serve': return serve(config);
     case 'install': return install(config, rest.includes('--force'), rest.includes('--global'));

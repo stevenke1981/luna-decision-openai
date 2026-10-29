@@ -280,10 +280,11 @@ test('luna decides the stop: a low score releases a turn the heuristic would res
       steps: 1,
       plan: null,
       text: PROMISE,
-      // The client's own sk- key is billed (LUNA_USE_CLIENT_KEY is on by default).
+      // A fixed upstream (LUNA_UPSTREAM) means the client's key may belong to another gateway,
+      // so it is not sent to OpenAI; with no configured key the call goes without one.
       opts: {
         url: 'https://api.openai.com/v1/decisions',
-        apiKey: 'sk-test',
+        apiKey: '',
         model: 'gpt-6-luna',
         timeoutMs: 3000,
         cacheMode: 'explicit',

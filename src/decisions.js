@@ -10,6 +10,7 @@
 // - The state is `input_json`: the request, a phrase about the last step and the recent steps.
 // Luna's answers are still gated by the rules in policy.js and longtask.js (combineEffort and
 // lunaStopCheck): the rules' escalation for a failing agent always stands.
+import { createHash } from 'node:crypto';
 import { assessStop } from './longtask.js';
 
 const MAX_REQUEST = 2000;
@@ -259,11 +260,19 @@ function expectAnswer(answer, type, name) {
   return answer;
 }
 
+// A level's entry in a probability list: matched by its value (index) or label when the
+// entries carry them, so the order of the list does not matter; by position otherwise.
+function listEntry(list, label, i) {
+  if (list.some((e) => e && typeof e === 'object' && ('value' in e || 'label' in e))) {
+    return list.find((e) => e?.value === i || e?.label === label);
+  }
+  return list[i];
+}
+
 // The probability of each level, in level order. The API may key them by index or by label.
 function levelProbabilities(answer, labels) {
   const p = answer.probabilities;
-  const values = Array.isArray(p)
-    ? labels.map((_, i) => p[i])
+  const values = Array.isArray(p) ? labels.map((label, i) => listEntry(p, label, i))
     : p && typeof p === 'object' ? labels.map((label, i) => p[label] ?? p[i] ?? p[String(i)]) : [];
   const nums = values.map((v) => (typeof v === 'object' && v ? v.probability : v)).map((v) => (Number.isFinite(v) ? v : 0));
   const total = nums.reduce((a, b) => a + b, 0);
@@ -281,7 +290,8 @@ export function scoreLevel(answer, ladder, quantile = 0.5) {
     let cumulative = 0;
     for (let i = 0; i < probs.length; i++) {
       cumulative += probs[i];
-      if (cumulative >= quantile - 1e-9) return { level: i, probs };
+      // A level Luna gives no weight is never picked, even at quantile 0.
+      if (probs[i] > 0 && cumulative >= quantile - 1e-9) return { level: i, probs };
     }
     return { level: top, probs };
   }
@@ -347,6 +357,8 @@ export function callCost(usage) {
 // A Luna that fails in a way the next call would repeat is skipped for a while, so a hung
 // endpoint, a bad key or an exhausted quota costs one failure, not one per generation.
 const PAUSE_MS = { timeout: 30_000, auth: 600_000, rate: 60_000 };
+const MAX_RETRY_AFTER_MS = 600_000;
+// Keyed by endpoint and key, so one client's bad key does not pause Luna for everyone else.
 const pausedUntil = new Map();
 // Set when the API rejects explicit cache breakpoints; later calls use the implicit mode.
 let explicitCacheRejected = false;
@@ -357,13 +369,17 @@ export function resetLunaPause() {
   explicitCacheRejected = false;
 }
 
-function pause(url, ms) {
-  pausedUntil.set(url, Date.now() + ms);
+function pauseKey(opts) {
+  return `${opts.url} ${createHash('sha256').update(opts.apiKey ?? '').digest('hex').slice(0, 16)}`;
+}
+
+function pause(opts, ms) {
+  pausedUntil.set(pauseKey(opts), Date.now() + ms);
 }
 
 function retryAfterMs(res) {
   const s = Number(res.headers.get('retry-after'));
-  return Number.isFinite(s) && s > 0 ? s * 1000 : PAUSE_MS.rate;
+  return Number.isFinite(s) && s > 0 ? Math.min(s * 1000, MAX_RETRY_AFTER_MS) : PAUSE_MS.rate;
 }
 
 function headersFor(opts) {
@@ -382,7 +398,7 @@ async function send(opts, body) {
     });
   } catch (err) {
     // Only a timeout pauses: a refused connection fails at once and costs nothing.
-    if (err?.name === 'TimeoutError') pause(opts.url, PAUSE_MS.timeout);
+    if (err?.name === 'TimeoutError') pause(opts, PAUSE_MS.timeout);
     throw err;
   }
 }
@@ -395,7 +411,7 @@ async function send(opts, body) {
  */
 export async function postDecision(opts, state, questions) {
   if (!opts.apiKey) throw new Error('no OpenAI API key (set OPENAI_API_KEY or LUNA_API_KEY)');
-  const until = pausedUntil.get(opts.url) ?? 0;
+  const until = pausedUntil.get(pauseKey(opts)) ?? 0;
   if (Date.now() < until) throw new Error(`Luna paused for ${Math.ceil((until - Date.now()) / 1000)} s after a failure`);
   let mode = opts.cacheMode ?? 'explicit';
   if (mode === 'explicit' && explicitCacheRejected) mode = 'implicit';
@@ -407,11 +423,11 @@ export async function postDecision(opts, state, questions) {
     body = await res.json().catch(() => null);
   }
   if (!res.ok) {
-    if (res.status === 401 || res.status === 403) pause(opts.url, PAUSE_MS.auth);
-    if (res.status === 429) pause(opts.url, retryAfterMs(res));
+    if (res.status === 401 || res.status === 403) pause(opts, PAUSE_MS.auth);
+    if (res.status === 429) pause(opts, retryAfterMs(res));
     throw new Error(`Luna HTTP ${res.status}: ${body?.error?.message ?? 'no error body'}`);
   }
-  pausedUntil.delete(opts.url);
+  pausedUntil.delete(pauseKey(opts));
   return body;
 }
 

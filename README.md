@@ -98,7 +98,7 @@ proxy 依客戶端送出的金鑰選上游（`src/proxy.js` 的 `upstreamBase`�
 2. 專案資料夾的 `.env.local`，再 `.env`。
 3. `LUNA_HOME`（預設 `~/.luna-decision-openai`）的 `.env.local`，再 `.env`。
 
-同一變數先找到者勝出。`serve` 啟動時會列出載入了哪些檔案與變數名稱（不印出值）。
+同一變數先找到者勝出。只讀取 `LUNA_*`、`OPENAI_*`、`OPENROUTER_*` 變數，共用 `.env` 裡的其他秘密不會傳給 `codex` 與它執行的工具。檔案開頭的 UTF-8 BOM 會被忽略；檔案存在但讀不到時只顯示警告。`serve` 啟動時會列出載入了哪些檔案與變數名稱（不印出值）。命令列的 `--model`／`--effort`／`--provider` 優先於以上全部。
 
 注意：
 
@@ -195,16 +195,16 @@ Luna 失敗時只用規則。`LUNA_MODE=heuristic` 或 `llm` 也只用規則；`
 
 1. `LUNA_API_KEY`；
 2. 否則 `OPENAI_API_KEY`；
-3. 否則（`LUNA_USE_CLIENT_KEY=on`，預設）客戶端自己送的 `Authorization: Bearer sk-…`（不接受 `sk-or-`）；
+3. 否則（`LUNA_USE_CLIENT_KEY=on`，預設）客戶端自己送的 OpenAI 金鑰，但只在兩個條件都成立時：金鑰是 OpenAI 的格式（`sk-proj-`、`sk-svcacct-`、`sk-admin-`，或舊式 `sk-` 加 40 個以上英數字），且該請求本身就送往 OpenAI API（沒有設定 `LUNA_UPSTREAM`，`LUNA_API_UPSTREAM` 仍是 `api.openai.com`）。`sk-or-`、`sk-ant-` 等其他廠商的金鑰永遠不會送到 OpenAI。`OPENAI_ORG_ID`／`OPENAI_PROJECT_ID` 只搭配設定的金鑰送出，不搭配客戶端金鑰；
 4. 都沒有 → 每次決策改用規則，`serve` 啟動時會提示。
 
 **ChatGPT 登入不能用來付 Luna 的費用。** Codex 以 ChatGPT 登入時，它送出的是 JWT 或 `chatgpt-account-id`，這些不會用於 Decisions API。請設定 `OPENAI_API_KEY`。
 
 **主模型上游**（`src/proxy.js` 的 `upstreamBase`）：`LUNA_UPSTREAM` 有設定時固定使用；否則 ChatGPT 登入 → `https://chatgpt.com/backend-api/codex`；`sk-or-` 金鑰 → `https://openrouter.ai/api/v1`；其他 → `https://api.openai.com/v1`。
 
-**失敗時的暫停**（`src/decisions.js`）：逾時暫停 Luna 30 秒；401／403 暫停 10 分鐘；429 依 `Retry-After`，無此標頭則 60 秒。暫停期間直接用規則，不會每個 generation 都等逾時。暫停以 `LUNA_DECISION_URL` 為單位，所有金鑰共用。API 若以含 "cache" 字樣的 400 拒絕 explicit cache，程式自動改用 implicit 重試，之後不再送 explicit。
+**失敗時的暫停**（`src/decisions.js`）：逾時暫停 Luna 30 秒；401／403 暫停 10 分鐘；429 依 `Retry-After`，無此標頭則 60 秒。暫停期間直接用規則，不會每個 generation 都等逾時。暫停以「`LUNA_DECISION_URL` + 金鑰」為單位，一把壞掉的客戶端金鑰不會讓其他金鑰一起暫停。`Retry-After` 最多採計 10 分鐘。錯誤訊息寫入紀錄前會壓成一行、截到 120 字。API 若以含 "cache" 字樣的 400 拒絕 explicit cache，程式自動改用 implicit 重試，之後不再送 explicit。
 
-**送給 Luna 的內容**：新 turn 送需求前 2000 字；turn 中送步驟描述與最近 8 步（指令前 160 字）；收工判斷送收尾文字末 800 字。預設送到 OpenAI。若 `LUNA_DECISION_URL` 指向其他位址，這些文字與金鑰也會送到該處。
+**送給 Luna 的內容**：新 turn 送需求前 2000 字；turn 中送步驟描述與最近 8 步（指令前 160 字）；收工判斷送收尾文字末 800 字。預設送到 OpenAI。若 `LUNA_DECISION_URL` 指向其他位址，這些文字與金鑰也會送到該處。**隱私提醒**：即使主模型走 OpenRouter 或其他上游，這些需求文字與指令片段仍會送到 OpenAI 給 Luna 判斷；指令裡若含權杖（例如 `curl -H "Authorization: …"`）也會一併送出。不希望如此時請用 `LUNA_MODE=heuristic`。
 
 ## 安裝與使用
 
@@ -305,7 +305,7 @@ aider 範例（未實測）：`aider --openai-api-base http://127.0.0.1:8791/v1 
 | `LUNA_MODEL` | `gpt-6.1-terra` | 主模型 id；`luna-auto` 別名與此 id 會改寫為它（`--model` 設定同一個值） |
 | `LUNA_MODELS` | 空 | 額外的主模型 id（逗號分隔），會列在 `models` 中 |
 | `LUNA_AUTO_MODELS` | `luna-auto,auto` | 會交由 router 改寫為 `LUNA_MODEL` 的客戶端模型名稱 |
-| `LUNA_LEVELS` | `low,medium,high,xhigh,max` | effort 階梯，必須由低到高、不可重複，也是 Luna 的選項 |
+| `LUNA_LEVELS` | `low,medium,high,xhigh,max` | effort 階梯，必須由低到高、不可重複，也是 Luna 的選項；luna 模式至少要 2 級 |
 | `LUNA_DEFAULT_EFFORT` | `medium` | 新 turn 的規則預設、續跑後的下限；必須在階梯內（`--effort` 設定同一個值） |
 | `LUNA_MODE` | `luna` | `luna`；`heuristic`（只用規則，不呼叫 Luna）；`llm`（以 `LUNA_JUDGE_MODEL` 或主模型做判官，只在 Responses 第 2 步起）；`off`（不改 effort，只改別名模型） |
 | `LUNA_DECISION_URL` | `https://api.openai.com/v1/decisions` | Decisions API 端點 |
@@ -313,7 +313,7 @@ aider 範例（未實測）：`aider --openai-api-base http://127.0.0.1:8791/v1 
 | `LUNA_API_KEY` | 空 | 決策用金鑰，優先於 `OPENAI_API_KEY` |
 | `OPENAI_API_KEY` | 空 | Luna 決策的金鑰（`probe` 只用這個或 `LUNA_API_KEY`）；`--provider openai` 時也是主模型的金鑰 |
 | `OPENROUTER_API_KEY` | 空 | `--provider openrouter` 時主模型的金鑰（`sk-or-`）。Luna 仍需 `OPENAI_API_KEY` |
-| `LUNA_USE_CLIENT_KEY` | `on` | 無上述金鑰時，使用客戶端的 `sk-` 金鑰（`off` 關閉） |
+| `LUNA_USE_CLIENT_KEY` | `on` | 無上述金鑰時，使用客戶端的 OpenAI 格式金鑰，且僅限請求本身送往 OpenAI API 時（`off` 關閉） |
 | `OPENAI_ORG_ID`（或 `OPENAI_ORGANIZATION`） | 空 | 送出 `openai-organization` 標頭 |
 | `OPENAI_PROJECT_ID`（或 `OPENAI_PROJECT`） | 空 | 送出 `openai-project` 標頭 |
 | `LUNA_DECISION_TIMEOUT_MS` | `3000` | 單次決策逾時（至少 1）；逾時後暫停 Luna 30 秒 |

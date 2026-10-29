@@ -545,37 +545,84 @@ test('live gpt-6-luna shapes: lists of {value, label, probability} are read by e
   assert.deepEqual(r.reasons, ['luna needs_user 0.99, in progress 0.02']);
 });
 
-test('decisionKeyFor: the configured key wins; else the client\'s own OpenAI sk- key when allowed', () => {
+const PROJECT_KEY = `sk-proj-${'a1B2'.repeat(12)}`;
+const LEGACY_KEY = `sk-${'Z9y8'.repeat(12)}`;
+
+test("decisionKeyFor: the configured key wins; else the client's own OpenAI key when allowed", () => {
   const configured = loadConfig({ LUNA_API_KEY: 'sk-configured' });
-  assert.equal(decisionKeyFor(configured, { authorization: 'Bearer sk-client' }), 'sk-configured');
+  assert.equal(decisionKeyFor(configured, { authorization: `Bearer ${PROJECT_KEY}` }), 'sk-configured');
   assert.equal(decisionKeyFor(loadConfig({ OPENAI_API_KEY: 'sk-openai' }), {}), 'sk-openai');
   assert.equal(decisionKeyFor(loadConfig({ LUNA_API_KEY: 'sk-luna', OPENAI_API_KEY: 'sk-openai' }), {}), 'sk-luna');
 
   const client = loadConfig({});
   assert.equal(client.useClientKey, true);
-  assert.equal(decisionKeyFor(client, { authorization: 'Bearer sk-client' }), 'sk-client');
+  assert.equal(decisionKeyFor(client, { authorization: `Bearer ${PROJECT_KEY}` }), PROJECT_KEY);
+  assert.equal(decisionKeyFor(client, { authorization: `Bearer ${LEGACY_KEY}` }), LEGACY_KEY);
+  // Keys of other vendors that also start with sk- are never sent to OpenAI.
   assert.equal(decisionKeyFor(client, { authorization: 'Bearer sk-or-v1-openrouter' }), '');
+  assert.equal(decisionKeyFor(client, { authorization: `Bearer sk-ant-api03-${'x'.repeat(40)}` }), '');
+  assert.equal(decisionKeyFor(client, { authorization: 'Bearer sk-short' }), '');
   assert.equal(decisionKeyFor(client, { authorization: 'Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ4In0.sig' }), '');
-  assert.equal(decisionKeyFor(client, { authorization: 'Basic sk-client' }), '');
+  assert.equal(decisionKeyFor(client, { authorization: `Basic ${PROJECT_KEY}` }), '');
   assert.equal(decisionKeyFor(client, {}), '');
   assert.equal(decisionKeyFor(client), '');
 
+  // A request bound for another gateway keeps its key away from OpenAI.
+  const gateway = loadConfig({ LUNA_UPSTREAM: 'https://api.deepseek.com/v1' });
+  assert.equal(decisionKeyFor(gateway, { authorization: `Bearer ${LEGACY_KEY}` }), '');
+  const proxied = loadConfig({ LUNA_API_UPSTREAM: 'https://gateway.example/v1' });
+  assert.equal(decisionKeyFor(proxied, { authorization: `Bearer ${PROJECT_KEY}` }), '');
+
   const off = loadConfig({ LUNA_USE_CLIENT_KEY: 'off' });
-  assert.equal(decisionKeyFor(off, { authorization: 'Bearer sk-client' }), '');
+  assert.equal(decisionKeyFor(off, { authorization: `Bearer ${PROJECT_KEY}` }), '');
 });
 
 test('decisionOptions maps the config to the Decisions call, with the key the caller chose', () => {
   const config = loadConfig({
     LUNA_API_KEY: 'sk-cfg', OPENAI_ORG_ID: 'org-1', OPENAI_PROJECT_ID: 'proj-1', LUNA_CACHE: 'implicit', LUNA_DECISION_TIMEOUT_MS: '1500',
   });
+  // A client's own key gets no organization or project: those belong to the configured key.
   assert.deepEqual(decisionOptions(config, 'sk-client'), {
     url: 'https://api.openai.com/v1/decisions',
     apiKey: 'sk-client',
     model: 'gpt-6-luna',
     timeoutMs: 1500,
     cacheMode: 'implicit',
-    organization: 'org-1',
-    project: 'proj-1',
+    organization: '',
+    project: '',
   });
-  assert.equal(decisionOptions(config).apiKey, 'sk-cfg');
+  const own = decisionOptions(config);
+  assert.equal(own.apiKey, 'sk-cfg');
+  assert.equal(own.organization, 'org-1');
+  assert.equal(own.project, 'proj-1');
+});
+
+test('review fixes: list order, zero-weight levels, per-key pauses and capped Retry-After', async () => {
+  const ladder = ['low', 'medium', 'high', 'xhigh', 'max'];
+  const entries = [0, 0.05, 0.05, 0.7, 0.2].map((probability, value) => ({ value, label: ladder[value], probability }));
+  const answer = (probabilities) => ({ type: 'score', name: 'effort', score: 3, probabilities, confidence: 0.7 });
+  // The entries carry their level, so their order and omitted zero levels do not matter.
+  assert.equal(scoreLevel(answer([...entries].sort((a, b) => b.probability - a.probability)), ladder).level, 3);
+  assert.equal(scoreLevel(answer(entries.filter((e) => e.probability > 0)), ladder).level, 3);
+  // Quantile 0 picks the lowest level Luna gives any weight, not a zero-probability one.
+  assert.equal(scoreLevel(answer(entries), ladder, 0).level, 1);
+
+  const json = (status, body, headers = {}) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json', ...headers } });
+  const opts = (apiKey) => ({ url: DECISIONS_URL, apiKey, model: 'gpt-6-luna', timeoutMs: 1000 });
+  const calls = stubFetch((n, init) => (init.headers.authorization === 'Bearer sk-bad'
+    ? json(401, { error: { message: 'Incorrect API key' } })
+    : json(200, { answers: [] })));
+  await assert.rejects(postDecision(opts('sk-bad'), {}, []), /HTTP 401/);
+  // Another key is not paused by the bad one.
+  await postDecision(opts('sk-good'), {}, []);
+  assert.equal(calls.length, 2);
+  await assert.rejects(postDecision(opts('sk-bad'), {}, []), /paused/);
+  assert.equal(calls.length, 2);
+
+  resetLunaPause();
+  stubFetch(() => json(429, { error: { message: 'slow down' } }, { 'retry-after': '86400' }));
+  await assert.rejects(postDecision(opts('sk-good'), {}, []), /HTTP 429/);
+  await assert.rejects(postDecision(opts('sk-good'), {}, []), /paused for (\d+) s/, 'capped pause');
+  const m = await postDecision(opts('sk-good'), {}, []).catch((e) => e.message);
+  assert.ok(Number(m.match(/paused for (\d+) s/)[1]) <= 600);
 });

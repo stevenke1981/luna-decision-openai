@@ -58,6 +58,8 @@ export function loadConfig(env = process.env) {
   // back to the rules, so the default never blocks a client.
   const mode = oneOf(env, 'LUNA_MODE', 'luna', ['luna', 'heuristic', 'llm', 'off']);
   const ladder = parseLadder(env.LUNA_LEVELS || 'low,medium,high,xhigh,max');
+  // A score question needs 2 to 10 levels.
+  if (mode === 'luna' && ladder.length < 2) throw new Error('LUNA_LEVELS needs at least 2 efforts for Luna to choose between');
   const defaultEffort = (env.LUNA_DEFAULT_EFFORT || 'medium').trim().toLowerCase();
   if (!ladder.includes(defaultEffort)) {
     throw new Error(`LUNA_DEFAULT_EFFORT must be one of LUNA_LEVELS (${ladder.join(',')}); got "${defaultEffort}"`);

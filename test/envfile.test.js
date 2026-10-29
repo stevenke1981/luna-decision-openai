@@ -53,3 +53,23 @@ test('provider sets how Codex authenticates: login, OPENAI_API_KEY or OPENROUTER
   assert.match(text, /env_key = "OPENROUTER_API_KEY"/);
   assert.doesNotMatch(text, /requires_openai_auth/);
 });
+
+test('env files: a UTF-8 BOM is ignored, only this tool\'s variables are taken, read errors are reported', () => {
+  const dir = tempDir();
+  try {
+    const file = path.join(dir, '.env.local');
+    fs.writeFileSync(file, '\uFEFFOPENAI_API_KEY=sk-bom\nGITHUB_TOKEN=ghp-secret\nLUNA_PORT=9001\n');
+    const env = {};
+    const [loaded, broken] = loadEnvFiles(env, [file, dir]);
+    assert.equal(env.OPENAI_API_KEY, 'sk-bom');
+    assert.equal(env.LUNA_PORT, '9001');
+    // Other secrets in a shared .env never reach codex or its tools.
+    assert.equal(env.GITHUB_TOKEN, undefined);
+    assert.deepEqual(loaded.keys.sort(), ['LUNA_PORT', 'OPENAI_API_KEY']);
+    // A directory where a file should be is reported instead of aborting every command.
+    assert.equal(broken.file, dir);
+    assert.ok(broken.error);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

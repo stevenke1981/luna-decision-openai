@@ -5,28 +5,43 @@ import { assess, nextState, isNewTurn } from './policy.js';
 import { judge } from './judge.js';
 import { lunaDecide, combineEffort } from './decisions.js';
 
+// OpenAI key shapes: project, service-account and admin keys, and legacy `sk-` + 40+ letters
+// and digits. Other vendors' `sk-` keys (sk-or-, sk-ant-, ...) have a different prefix.
+const OPENAI_KEY = /^sk-(?:(?:proj|svcacct|admin)-[\w-]{20,}|[A-Za-z0-9]{40,})$/;
+const MAX_FAILURE = 120;
+
 /**
  * The API key Luna is billed to: the configured one, else (LUNA_USE_CLIENT_KEY=on) the
- * client's own OpenAI `Bearer sk-...` key. ChatGPT logins and OpenRouter keys cannot call
- * the Decisions API, so they are never used.
+ * client's own OpenAI key, but only when that request itself goes to OpenAI's API (no fixed
+ * upstream), so a key meant for another gateway is never sent to OpenAI. ChatGPT logins and
+ * OpenRouter keys cannot call the Decisions API and are never used.
  */
 export function decisionKeyFor(config, headers = {}) {
   if (config.decisionKey) return config.decisionKey;
-  if (!config.useClientKey) return '';
-  const m = String(headers.authorization ?? '').match(/^Bearer\s+(sk-(?!or-)\S+)$/);
-  return m ? m[1] : '';
+  if (!config.useClientKey || config.upstream) return '';
+  if (new URL(config.apiUpstream).hostname !== 'api.openai.com') return '';
+  const m = String(headers.authorization ?? '').match(/^Bearer\s+(\S+)$/);
+  return m && OPENAI_KEY.test(m[1]) ? m[1] : '';
+}
+
+/** One line of at most MAX_FAILURE characters, for logs and the console. */
+export function failureText(err) {
+  return String(err?.message ?? err).replace(/[\r\n]+/g, ' ').slice(0, MAX_FAILURE);
 }
 
 /** The Decisions call options shared by effort routing and the stop check. */
 export function decisionOptions(config, apiKey) {
+  const key = apiKey ?? config.decisionKey;
+  const own = key === config.decisionKey;
   return {
     url: config.decisionUrl,
-    apiKey: apiKey ?? config.decisionKey,
+    apiKey: key,
     model: config.decisionModel,
     timeoutMs: config.decisionTimeoutMs,
     cacheMode: config.cacheMode,
-    organization: config.organization,
-    project: config.project,
+    // The organization and project belong to the configured key, not to a client's own key.
+    organization: own ? config.organization : '',
+    project: own ? config.project : '',
   };
 }
 
@@ -52,7 +67,7 @@ export function createRouter(config, { judgeFn = judge, decideFn = lunaDecide } 
         return { a: combineEffort(d, heuristic, turn.steps.length === 0), source: useLuna ? 'luna' : 'heuristic (luna considered)', cost: d.cost ?? null,
           suggestions: { luna: ladder[d.target], heuristic: ladder[heuristic.target] } };
       } catch (err) {
-        return { a: heuristic, source: `heuristic (luna failed: ${err.message})`, cost: null };
+        return { a: heuristic, source: `heuristic (luna failed: ${failureText(err)})`, cost: null };
       }
     }
     if (config.mode === 'llm' && judgeTarget && step > 1) {
@@ -66,7 +81,7 @@ export function createRouter(config, { judgeFn = judge, decideFn = lunaDecide } 
         });
         return { a, source: 'judge', cost: null };
       } catch (err) {
-        return { a: heuristic, source: `heuristic (judge failed: ${err.message})`, cost: null };
+        return { a: heuristic, source: `heuristic (judge failed: ${failureText(err)})`, cost: null };
       }
     }
     return { a: heuristic, source: 'heuristic', cost: null };
