@@ -107,6 +107,39 @@ proxy 依客戶端送出的金鑰選上游（`src/proxy.js` 的 `upstreamBase`�
 
 ## 工作方式
 
+### 運作模式（`LUNA_MODE`）
+
+共有 **4 種**模式，預設 `luna`。模式決定兩件事：每次 generation 的 effort 由誰決定，以及收工時由誰判斷「是否還沒做完」。
+
+| 模式 | effort 由誰決定 | 收工判斷 | 需要的金鑰／額外費用 | 計畫提醒、續跑、驗證關卡、自我審查 |
+|---|---|---|---|---|
+| `luna`（預設） | OpenAI `gpt-6-luna`（Decisions API）。新 turn 由 Luna 決定；turn 中 Luna 只能調高，本地規則為下限 | Luna 讀收尾文字，規則把關（驗證關卡、計畫未完成等規則分數較高時以規則為準） | `OPENAI_API_KEY` 或 `LUNA_API_KEY`；每次決策約 $0.00015 以內。沒有金鑰、Luna 棄權（信心低於 `LUNA_MIN_CONFIDENCE`）或呼叫失敗時自動改用規則 | 全部啟用 |
+| `heuristic` | 只用本地規則（見下方「規則」） | 只用規則 | 不需要金鑰，不呼叫 Luna，沒有額外費用 | 全部啟用 |
+| `llm` | 以 `LUNA_JUDGE_MODEL`（未設定時用主模型）當判官，effort 為 `LUNA_JUDGE_EFFORT`（預設 `low`），逾時 `LUNA_JUDGE_TIMEOUT_MS`。只在 Responses 的第 2 步起使用；新 turn 的第一步、Chat Completions、判官失敗時用規則 | 只用規則 | 判官請求送往主模型的同一上游、使用客戶端的憑證，計入主模型帳單 | 全部啟用 |
+| `off` | 不改 effort，客戶端送什麼就用什麼；只把 `luna-auto` 等別名改成 `LUNA_MODEL` | 不判斷 | 無 | 全部停用（純轉送） |
+
+選擇建議：
+- 一般使用：`luna`。
+- 沒有 OpenAI API 金鑰、不想把需求文字送到 OpenAI，或想要零額外費用：`heuristic`。長任務續跑、驗證與自審照常運作。
+- 想用自己指定的模型判斷 effort：`llm`（實驗性質，判官會花主模型的額度）。
+- 只想用別名、完全不介入：`off`。
+
+設定方式（與其他變數相同，系統環境變數優先於 `.env.local`）：
+
+```powershell
+# 只對這個視窗有效
+$env:LUNA_MODE = "heuristic"
+luna-decision-openai stop        # 已在背景執行的 proxy 要先停掉，新模式才會生效
+luna-decision-openai codex       # 背景啟動的 proxy 會沿用這個視窗的環境變數
+```
+
+```ini
+# 或寫進 .env.local（專案資料夾或 ~/.luna-decision-openai/）
+LUNA_MODE=heuristic
+```
+
+確認目前模式：`serve` 啟動列的 `mode=…`，或 `/luna/health` 回傳的 `mode`。每筆決策的 `source` 欄位顯示實際由誰決定，例如 `luna`、`heuristic (luna considered)`、`heuristic (luna failed: …)`、`judge`、`model only`。
+
 ### Effort 如何決定
 
 proxy 位於客戶端與上游之間。每次 generation 前，它讀取本輪的軌跡並向 Luna 提問。
