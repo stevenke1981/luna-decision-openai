@@ -173,6 +173,8 @@ function abortOnClose(res) {
 
 // LUNA_MODE=off leaves the effort alone, but a luna-auto alias still needs the real model id.
 const OFF_DECISION = Object.freeze({ effort: null, from: null, step: 0, hold: 0, reasons: ['mode off'], source: 'off', cost: null, ms: 0 });
+// A luna-auto request that asks for no reasoning: the model id is set, the effort left alone.
+const MODEL_ONLY_DECISION = Object.freeze({ ...OFF_DECISION, reasons: ['no reasoning requested'], source: 'model only' });
 
 // The decision as it went upstream: the effort only when it was applied, the model as sent.
 function describeSent(decision, { applyEffort, model, requested }) {
@@ -212,6 +214,8 @@ export function createProxy(config, deps = {}) {
   async function decide(body, turn, { session, judgeTarget, applyEffort, routeModel, apiKey }) {
     if (config.mode === 'off') return routeModel ? OFF_DECISION : null;
     if (!applyEffort && !routeModel) return null;
+    // Only the model is rewritten, so asking Luna would cost a call whose answer goes unused.
+    if (!applyEffort) return MODEL_ONLY_DECISION;
     return router.route(body, session, judgeTarget, turn, { apiKey });
   }
 

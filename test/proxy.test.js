@@ -192,6 +192,25 @@ test('luna-auto is rewritten to the configured model id; other models keep their
   }
 });
 
+test('a luna-auto request without reasoning gets the model but costs no Luna call', async () => {
+  let calls = 0;
+  const decideFn = async () => { calls++; return { target: 2, hold: 0, reasons: ['stub'], cost: 0.0001 }; };
+  const h = await harness({ LUNA_MODE: 'luna', LUNA_API_KEY: 'sk-test' }, { decideFn });
+  try {
+    const { reasoning, ...plain } = request([user('hi')], { model: 'luna-auto' });
+    await fetch(`http://127.0.0.1:${h.port}/v1/responses`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(plain),
+    }).then((r) => r.text());
+    const sent = JSON.parse(h.seen[0].body);
+    assert.equal(sent.model, 'gpt-6.1-terra');
+    assert.equal(sent.reasoning, undefined);
+    assert.equal(calls, 0);
+    assert.equal(h.logged[0].source, 'model only');
+  } finally {
+    h.close();
+  }
+});
+
 test('LUNA_MODE=off still maps luna-auto to the model and leaves the effort alone', async () => {
   const h = await harness({ LUNA_MODE: 'off' });
   try {

@@ -280,8 +280,15 @@ test('luna decides the stop: a low score releases a turn the heuristic would res
       steps: 1,
       plan: null,
       text: PROMISE,
+      // The client's own sk- key is billed (LUNA_USE_CLIENT_KEY is on by default).
       opts: {
-        url: 'http://127.0.0.1:8100/api/alpha/decisions', apiKey: '', model: 'multilingual', timeoutMs: 2000,
+        url: 'https://api.openai.com/v1/decisions',
+        apiKey: 'sk-test',
+        model: 'gpt-6-luna',
+        timeoutMs: 3000,
+        cacheMode: 'explicit',
+        organization: '',
+        project: '',
       },
     }]);
   } finally {

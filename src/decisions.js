@@ -330,7 +330,9 @@ export function toAssessment(answers, ladder, minConfidence, quantile = 0.5) {
  * stands, and a tie keeps the rules' (deterministic) hold.
  */
 export function combineEffort(luna, heuristic, newTurn) {
-  if (newTurn || luna.target > heuristic.target) return luna;
+  if (newTurn) return luna;
+  // A higher Luna target keeps the rules' hold too, so a failing agent does not drop back early.
+  if (luna.target > heuristic.target) return { ...luna, hold: Math.max(luna.hold, heuristic.hold) };
   return { ...heuristic, reasons: [...heuristic.reasons, ...luna.reasons] };
 }
 
