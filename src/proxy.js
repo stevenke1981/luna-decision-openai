@@ -7,7 +7,7 @@
 import http from 'node:http';
 import { randomUUID } from 'node:crypto';
 import zlib from 'node:zlib';
-import { createRouter, decisionKeyFor, decisionOptions } from './router.js';
+import { createRouter, decisionKeyFor, decisionOptions, effectiveMode } from './router.js';
 import { parseTurn } from './trajectory.js';
 import { parseChatTurn, chatWantsReasoning, applyChatEffort, chatSessionKey } from './chat.js';
 import { createDecisionLog, formatDecision, formatContinue, usageTokens } from './log.js';
@@ -242,7 +242,7 @@ export function createProxy(config, deps = {}) {
   // by the stop rules; when luna fails, the rules decide alone, and `source` says which did.
   async function stopCheck(turn, plan, text, apiKey) {
     const rules = { verify: config.verify };
-    if (config.mode !== 'luna') return { ...assessStop(turn, plan, text, rules), source: 'heuristic' };
+    if (effectiveMode(config, apiKey) !== 'luna') return { ...assessStop(turn, plan, text, rules), source: 'heuristic' };
     try {
       const judged = await stopCheckFn(turn, plan, text, { ...decisionOptions(config, apiKey), ...rules });
       return { ...judged, source: 'luna' };
@@ -420,7 +420,10 @@ export function createProxy(config, deps = {}) {
     stats.requests++;
     if (req.url === '/luna/health') {
       res.writeHead(200, { 'content-type': 'application/json' });
-      return res.end(JSON.stringify({ ok: true, ...identity, mode: config.mode, model: config.model, ladder: config.ladder, decisionModel: config.decisionModel, stats }));
+      return res.end(JSON.stringify({
+        ok: true, ...identity, mode: config.mode, ...(config.mode === 'auto' ? { autoFallback: config.autoFallback } : {}),
+        model: config.model, ladder: config.ladder, decisionModel: config.decisionModel, stats,
+      }));
     }
     const raw = await readBody(req);
     const path = req.url.split('?')[0];

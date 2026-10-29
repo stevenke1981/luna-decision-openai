@@ -54,12 +54,15 @@ function oneOf(env, name, fallback, allowed) {
 
 export function loadConfig(env = process.env) {
   const home = env.LUNA_HOME || path.join(os.homedir(), '.luna-decision-openai');
-  // OpenAI's Luna decides by default. Without a key, or when it fails, every decision falls
-  // back to the rules, so the default never blocks a client.
-  const mode = oneOf(env, 'LUNA_MODE', 'luna', ['luna', 'heuristic', 'llm', 'off']);
+  // auto (the default): OpenAI's Luna decides for a request that has a key for it, the
+  // fallback (LUNA_AUTO_FALLBACK) for one that has none. When Luna fails, every decision falls
+  // back to the rules, so no mode ever blocks a client.
+  const mode = oneOf(env, 'LUNA_MODE', 'auto', ['auto', 'luna', 'heuristic', 'llm', 'off']);
   const ladder = parseLadder(env.LUNA_LEVELS || 'low,medium,high,xhigh,max');
   // A score question needs 2 to 10 levels.
-  if (mode === 'luna' && ladder.length < 2) throw new Error('LUNA_LEVELS needs at least 2 efforts for Luna to choose between');
+  if ((mode === 'luna' || mode === 'auto') && ladder.length < 2) {
+    throw new Error('LUNA_LEVELS needs at least 2 efforts for Luna to choose between');
+  }
   const defaultEffort = (env.LUNA_DEFAULT_EFFORT || 'medium').trim().toLowerCase();
   if (!ladder.includes(defaultEffort)) {
     throw new Error(`LUNA_DEFAULT_EFFORT must be one of LUNA_LEVELS (${ladder.join(',')}); got "${defaultEffort}"`);
@@ -99,6 +102,8 @@ export function loadConfig(env = process.env) {
     reviewRounds: intEnv(env, 'LUNA_REVIEW_ROUNDS', 1),
     nudge: switchEnv(env, 'LUNA_NUDGE', 'on'),
     mode,
+    // What LUNA_MODE=auto does for a request without a Luna key: the free rules, or the LLM judge.
+    autoFallback: oneOf(env, 'LUNA_AUTO_FALLBACK', 'heuristic', ['heuristic', 'llm']),
     // How the Codex profile authenticates the main model: the ChatGPT login, OPENAI_API_KEY or
     // OPENROUTER_API_KEY. The proxy picks the upstream from the key the client sends.
     provider: oneOf(env, 'LUNA_PROVIDER', 'chatgpt', ['chatgpt', 'openai', 'openrouter']),

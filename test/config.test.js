@@ -4,9 +4,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { loadConfig, KNOWN_MODELS } from '../src/config.js';
 
-test('defaults: luna mode, the low..max ladder at medium, gpt-6.1-terra on port 8791 with the Decisions API', () => {
+test('defaults: auto mode (heuristic fallback), the low..max ladder at medium, gpt-6.1-terra on port 8791 with the Decisions API', () => {
   const cfg = loadConfig({});
-  assert.equal(cfg.mode, 'luna');
+  assert.equal(cfg.mode, 'auto');
+  assert.equal(cfg.autoFallback, 'heuristic');
   assert.deepEqual(cfg.ladder, ['low', 'medium', 'high', 'xhigh', 'max']);
   assert.equal(cfg.defaultEffort, 'medium');
   assert.equal(cfg.model, 'gpt-6.1-terra');
@@ -76,9 +77,16 @@ test('LUNA_DEFAULT_EFFORT must be an effort on the ladder', () => {
   assert.throws(() => loadConfig({ LUNA_LEVELS: 'low,high', LUNA_DEFAULT_EFFORT: 'xhigh' }), /LUNA_DEFAULT_EFFORT must be one of LUNA_LEVELS \(low,high\)/);
 });
 
-test('LUNA_MODE accepts luna|heuristic|llm|off and nothing else', () => {
-  for (const mode of ['luna', 'heuristic', 'llm', 'off']) assert.equal(loadConfig({ LUNA_MODE: mode }).mode, mode);
-  assert.throws(() => loadConfig({ LUNA_MODE: 'gpt' }), /LUNA_MODE must be luna\|heuristic\|llm\|off/);
+test('LUNA_MODE accepts auto|luna|heuristic|llm|off and nothing else', () => {
+  for (const mode of ['auto', 'luna', 'heuristic', 'llm', 'off']) assert.equal(loadConfig({ LUNA_MODE: mode }).mode, mode);
+  assert.throws(() => loadConfig({ LUNA_MODE: 'gpt' }), /LUNA_MODE must be auto\|luna\|heuristic\|llm\|off/);
+});
+
+test('LUNA_AUTO_FALLBACK accepts heuristic|llm; auto needs a ladder Luna can choose from', () => {
+  assert.equal(loadConfig({ LUNA_AUTO_FALLBACK: 'LLM' }).autoFallback, 'llm');
+  assert.throws(() => loadConfig({ LUNA_AUTO_FALLBACK: 'off' }), /LUNA_AUTO_FALLBACK must be heuristic\|llm/);
+  assert.throws(() => loadConfig({ LUNA_LEVELS: 'medium', LUNA_DEFAULT_EFFORT: 'medium' }), /at least 2 efforts/);
+  assert.equal(loadConfig({ LUNA_MODE: 'heuristic', LUNA_LEVELS: 'medium', LUNA_DEFAULT_EFFORT: 'medium' }).ladder.length, 1);
 });
 
 test('LUNA_CACHE accepts explicit|implicit|off and rejects anything else', () => {

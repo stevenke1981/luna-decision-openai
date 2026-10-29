@@ -267,7 +267,7 @@ test('help names the luna-decision-openai commands, the variables and the port',
     assert.equal(res.code, 0);
     assert.match(res.out, /luna-decision-openai serve/);
     assert.match(res.out, /codex -p luna-decision/);
-    for (const name of ['LUNA_MODEL (gpt-6.1-terra)', 'LUNA_DEFAULT_EFFORT (medium)', 'LUNA_CONTINUE (on|off)',
+    for (const name of ['LUNA_MODEL (gpt-6.1-terra)', 'LUNA_MODE (auto|luna|heuristic|llm|off)', 'LUNA_AUTO_FALLBACK (heuristic|llm)', 'LUNA_DEFAULT_EFFORT (medium)', 'LUNA_CONTINUE (on|off)',
       'LUNA_MAX_CONTINUES (20)', 'LUNA_MAX_STALLS (2)', 'LUNA_VERIFY (on|off)', 'LUNA_REVIEW_ROUNDS (1)', 'LUNA_NUDGE (on|off)', 'LUNA_PORT (8791)']) {
       assert.ok(res.out.includes(name), `help is missing ${name}`);
     }

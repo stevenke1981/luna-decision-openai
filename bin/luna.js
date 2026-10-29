@@ -46,7 +46,7 @@ Environment (also read from .env.local / .env in the project folder or LUNA_HOME
   OPENROUTER_API_KEY  the main model's key with --provider openrouter (Luna still needs an OpenAI key)
   LUNA_PROVIDER (chatgpt|openai|openrouter)
   LUNA_PORT (8791)  LUNA_MODEL (gpt-6.1-terra)  LUNA_LEVELS (low,medium,high,xhigh,max)  LUNA_DEFAULT_EFFORT (medium)
-  LUNA_MODE (luna|heuristic|llm|off)  LUNA_DECISION_MODEL (gpt-6-luna)  LUNA_DECISION_TIMEOUT_MS (3000)
+  LUNA_MODE (auto|luna|heuristic|llm|off)  LUNA_AUTO_FALLBACK (heuristic|llm)  LUNA_DECISION_MODEL (gpt-6-luna)  LUNA_DECISION_TIMEOUT_MS (3000)
   LUNA_MIN_CONFIDENCE (0.4)  LUNA_EFFORT_QUANTILE (0.5)  LUNA_CACHE (explicit|implicit|off)  LUNA_USE_CLIENT_KEY (on|off)
   LUNA_CONTINUE (on|off)  LUNA_MAX_CONTINUES (20)  LUNA_MAX_STALLS (2)  LUNA_CONTINUE_THRESHOLD (0.6)  LUNA_NUDGE (on|off)
   LUNA_VERIFY (on|off)  LUNA_REVIEW_ROUNDS (1)
@@ -208,7 +208,7 @@ function serve(config) {
   });
   server.listen(config.port, config.host, async () => {
     console.log(`${NAME} v${VERSION} (build ${BUILD}) listening on http://${config.host}:${config.port}/v1  `
-      + `mode=${config.mode} model=${config.model} default=${config.defaultEffort} ladder=${config.ladder.join('→')} `
+      + `mode=${modeLabel(config)} model=${config.model} default=${config.defaultEffort} ladder=${config.ladder.join('→')} `
       + `continue=${config.continueTurns ? `on (max ${config.maxContinues}, ${config.maxStalls} without progress)` : 'off'} `
       + `verify=${config.verify ? 'on' : 'off'} review=${config.reviewRounds} nudge=${config.nudge ? 'on' : 'off'}`);
     if (config.provider === 'openrouter' && !process.env.OPENROUTER_API_KEY) {
@@ -218,7 +218,17 @@ function serve(config) {
       console.log(`${NAME}: no OPENAI_API_KEY or LUNA_API_KEY; Luna uses a client's own sk- key when it sends one, `
         + 'otherwise decisions use the rules');
     }
+    if (config.mode === 'auto' && !config.decisionKey) {
+      console.log(`${NAME}: auto mode without OPENAI_API_KEY or LUNA_API_KEY: requests run in ${config.autoFallback} mode, `
+        + "or in luna mode when a client sends its own OpenAI sk- key");
+    }
   });
+}
+
+// "auto → luna" with a configured key, "auto → heuristic" without one; other modes as they are.
+function modeLabel(config) {
+  if (config.mode !== 'auto') return config.mode;
+  return `auto→${config.decisionKey ? 'luna' : config.autoFallback}`;
 }
 
 async function status(config) {

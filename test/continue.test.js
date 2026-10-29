@@ -733,3 +733,33 @@ test('long task: a model-only session (no reasoning) still starts each turn with
     h.close();
   }
 });
+
+test('auto mode: no key means the stop rules decide alone; a configured key brings Luna in', async () => {
+  let checks = 0;
+  const stopCheckFn = async () => {
+    checks++;
+    return { unfinished: 0.1, reasons: ['luna done 0.95, in progress 0.05'], cost: null };
+  };
+  const none = await start({ env: { LUNA_MODE: 'auto' }, deps: { stopCheckFn }, replies: [sse(answer('r1', PROMISE)), sse(answer('r2', DONE))] });
+  try {
+    await (await post(none, request([user('fix the parser'), ...shellStep('k1')]))).text();
+    assert.equal(checks, 0);
+    assert.equal(none.seen.length, 2, 'the rules resume the promise');
+    await until(() => none.logged.length === 1);
+    assert.equal(none.logged[0].source, 'heuristic');
+    assert.equal(none.logged[0].continues[0].source, 'heuristic');
+  } finally {
+    none.close();
+  }
+  const keyed = await start({ env: { LUNA_MODE: 'auto', OPENAI_API_KEY: 'sk-test-key' }, deps: { stopCheckFn }, replies: [sse(answer('r1', PROMISE)), sse(answer('r2', DONE))] });
+  try {
+    await (await post(keyed, request([user('fix the parser'), ...shellStep('k1')]))).text();
+    assert.equal(checks, 1);
+    assert.equal(keyed.seen.length, 1, 'Luna says done; with no edits there is no review');
+    await until(() => keyed.logged.length === 1);
+    // Luna was asked; mid-turn it may only raise the rules' effort, so either source shows it.
+    assert.match(keyed.logged[0].source, /^(?:luna|heuristic \(luna considered\))$/);
+  } finally {
+    keyed.close();
+  }
+});

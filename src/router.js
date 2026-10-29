@@ -25,6 +25,17 @@ export function decisionKeyFor(config, headers = {}) {
   return m && OPENAI_KEY.test(m[1]) ? m[1] : '';
 }
 
+/**
+ * The mode a request runs in. LUNA_MODE=auto becomes luna when the request has a key Luna can
+ * be billed to (see decisionKeyFor), and LUNA_AUTO_FALLBACK otherwise; other modes are fixed.
+ * @param {string} [apiKey] the request's Luna key; omitted, the configured key counts
+ * @returns {'luna'|'heuristic'|'llm'|'off'}
+ */
+export function effectiveMode(config, apiKey) {
+  if (config.mode !== 'auto') return config.mode;
+  return (apiKey ?? config.decisionKey) ? 'luna' : config.autoFallback ?? 'heuristic';
+}
+
 /** One line of at most MAX_FAILURE characters, for logs and the console. */
 export function failureText(err) {
   return String(err?.message ?? err).replace(/[\r\n]+/g, ' ').slice(0, MAX_FAILURE);
@@ -69,7 +80,8 @@ export function createRouter(config, { judgeFn = judge, decideFn = lunaDecide } 
 
   async function assessTurn(body, judgeTarget, turn, step, apiKey) {
     const heuristic = assess(turn, ladder, config.defaultEffort);
-    if (config.mode === 'luna') {
+    const mode = effectiveMode(config, apiKey);
+    if (mode === 'luna') {
       try {
         const d = await decideFn(turn, { ...decisionOptions(config, apiKey), ladder, minConfidence: config.minConfidence, quantile: config.effortQuantile });
         const useLuna = turn.steps.length === 0 || d.target > heuristic.target;
@@ -79,7 +91,7 @@ export function createRouter(config, { judgeFn = judge, decideFn = lunaDecide } 
         return { a: heuristic, source: `heuristic (luna failed: ${failureText(err)})`, cost: null };
       }
     }
-    if (config.mode === 'llm' && judgeTarget && step > 1) {
+    if (mode === 'llm' && judgeTarget && step > 1) {
       try {
         const a = await judgeFn(turn, {
           ...judgeTarget,

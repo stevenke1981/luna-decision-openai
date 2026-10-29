@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { wantsModelRouting, modelId, clampEffort } from '../src/model.js';
-import { createRouter } from '../src/router.js';
+import { createRouter, effectiveMode } from '../src/router.js';
 import { loadConfig } from '../src/config.js';
 import { parseTurn } from '../src/trajectory.js';
 
@@ -163,7 +163,7 @@ test('router: luna leads a new turn but inside a turn it may only raise the effo
     seen.push([turn.steps.length, opts.url, opts.model, opts.minConfidence]);
     return { target: 1, hold: 0, release: false, stuck: null, reasons: ['luna medium 0.80'], cost: null };
   };
-  const router = createRouter(loadConfig({}), { decideFn });
+  const router = createRouter(loadConfig({ LUNA_MODE: 'luna' }), { decideFn });
   // The rules would start this hard request at high; luna reads it and picks medium.
   const d = await route(router, [userMsg('refactor the auth module')]);
   assert.deepEqual([d.effort, d.source], ['medium', 'luna']);
@@ -172,4 +172,37 @@ test('router: luna leads a new turn but inside a turn it may only raise the effo
   assert.equal(stuck.effort, 'max');
   assert.match(stuck.reasons.join(';'), /3 failures in a row;luna medium 0.80/);
   assert.deepEqual(seen[0], [0, 'https://api.openai.com/v1/decisions', 'gpt-6-luna', 0.4]);
+});
+
+test('effectiveMode: auto is luna with a key and the fallback without one; other modes are fixed', () => {
+  const auto = loadConfig({});
+  assert.equal(effectiveMode(auto, 'sk-client'), 'luna');
+  assert.equal(effectiveMode(auto, ''), 'heuristic');
+  assert.equal(effectiveMode(auto), 'heuristic');
+  assert.equal(effectiveMode(loadConfig({ OPENAI_API_KEY: 'sk-x' })), 'luna');
+  assert.equal(effectiveMode(loadConfig({ LUNA_AUTO_FALLBACK: 'llm' }), ''), 'llm');
+  for (const mode of ['luna', 'heuristic', 'llm', 'off']) assert.equal(effectiveMode(loadConfig({ LUNA_MODE: mode }), 'sk-x'), mode);
+  assert.equal(effectiveMode(loadConfig({ LUNA_MODE: 'heuristic' }), 'sk-x'), 'heuristic');
+});
+
+test('router: auto asks Luna only for a request with a key', async () => {
+  let calls = 0;
+  const decideFn = async () => {
+    calls++;
+    return { target: 2, hold: 0, release: false, stuck: null, reasons: ['luna high'], cost: null };
+  };
+  const router = createRouter(loadConfig({}), { decideFn });
+  const input = [userMsg('list the files')];
+  const without = await router.route({ input }, 'a', null, parseTurn(input), { apiKey: '' });
+  assert.deepEqual([without.source, calls], ['heuristic', 0]);
+  const withKey = await router.route({ input }, 'b', null, parseTurn(input), { apiKey: 'sk-proj-abc' });
+  assert.deepEqual([withKey.source, withKey.effort, calls], ['luna', 'high', 1]);
+});
+
+test('router: auto with the llm fallback asks the judge when there is no key', async () => {
+  const judgeFn = async () => ({ target: 3, hold: 0, reasons: ['judge: hard'] });
+  const router = createRouter(loadConfig({ LUNA_AUTO_FALLBACK: 'llm' }), { judgeFn, decideFn: async () => { throw new Error('no luna'); } });
+  const input = [userMsg('fix it'), ...ok(1)];
+  const d = await router.route({ input }, 's', { url: 'u', headers: {} }, parseTurn(input), { apiKey: '' });
+  assert.deepEqual([d.source, d.effort], ['judge', 'xhigh']);
 });

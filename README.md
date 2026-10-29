@@ -54,7 +54,7 @@ If `npm link` was run but the command is not found, reopen the terminal. You can
 
 - Node.js ≥ 22.15。`package.json` 沒有 dependencies，不需要 `npm install`。
 - Codex CLI。在 Windows 上，`codex` 子指令要找 npm 安裝的版本（`codex.cmd` 與 `@openai/codex`）；找不到時會提示改用 `serve` 再執行 `codex -p luna-decision`。
-- OpenAI API 金鑰（`OPENAI_API_KEY` 或 `LUNA_API_KEY`）。`LUNA_MODE=heuristic` 只用規則，不需要金鑰。
+- OpenAI API 金鑰（`OPENAI_API_KEY` 或 `LUNA_API_KEY`）為選用。預設 `LUNA_MODE=auto`：有金鑰就由 Luna 決定，沒有就自動改用本地規則（`heuristic`），不必改設定。
 
 ## API keys / 金鑰設定
 
@@ -109,18 +109,21 @@ proxy 依客戶端送出的金鑰選上游（`src/proxy.js` 的 `upstreamBase`�
 
 ### 運作模式（`LUNA_MODE`）
 
-共有 **4 種**模式，預設 `luna`。模式決定兩件事：每次 generation 的 effort 由誰決定，以及收工時由誰判斷「是否還沒做完」。
+共有 **5 種**模式，預設 `auto`。模式決定兩件事：每次 generation 的 effort 由誰決定，以及收工時由誰判斷「是否還沒做完」。
 
 | 模式 | effort 由誰決定 | 收工判斷 | 需要的金鑰／額外費用 | 計畫提醒、續跑、驗證關卡、自我審查 |
 |---|---|---|---|---|
-| `luna`（預設） | OpenAI `gpt-6-luna`（Decisions API）。新 turn 由 Luna 決定；turn 中 Luna 只能調高，本地規則為下限 | Luna 讀收尾文字，規則把關（驗證關卡、計畫未完成等規則分數較高時以規則為準） | `OPENAI_API_KEY` 或 `LUNA_API_KEY`；每次決策約 $0.00015 以內。沒有金鑰、Luna 棄權（信心低於 `LUNA_MIN_CONFIDENCE`）或呼叫失敗時自動改用規則 | 全部啟用 |
+| `auto`（預設） | **每個請求各自判斷**：有 Luna 可用的金鑰就照 `luna` 模式；沒有就照 `LUNA_AUTO_FALLBACK`（預設 `heuristic`，可設 `llm`）。「有金鑰」指 `LUNA_API_KEY`、`OPENAI_API_KEY`，或客戶端自己送的 OpenAI 金鑰（條件同下節「Luna 用哪把金鑰」） | 同所選模式：`luna` 時由 Luna 判斷加規則把關，否則只用規則 | 有金鑰時同 `luna`；沒有金鑰時同 fallback（`heuristic` 免費） | 全部啟用 |
+| `luna` | OpenAI `gpt-6-luna`（Decisions API）。新 turn 由 Luna 決定；turn 中 Luna 只能調高，本地規則為下限 | Luna 讀收尾文字，規則把關（驗證關卡、計畫未完成等規則分數較高時以規則為準） | `OPENAI_API_KEY` 或 `LUNA_API_KEY`；每次決策約 $0.00015 以內。沒有金鑰、Luna 棄權（信心低於 `LUNA_MIN_CONFIDENCE`）或呼叫失敗時自動改用規則 | 全部啟用 |
 | `heuristic` | 只用本地規則（見下方「規則」） | 只用規則 | 不需要金鑰，不呼叫 Luna，沒有額外費用 | 全部啟用 |
 | `llm` | 以 `LUNA_JUDGE_MODEL`（未設定時用主模型）當判官，effort 為 `LUNA_JUDGE_EFFORT`（預設 `low`），逾時 `LUNA_JUDGE_TIMEOUT_MS`。只在 Responses 的第 2 步起使用；新 turn 的第一步、Chat Completions、判官失敗時用規則 | 只用規則 | 判官請求送往主模型的同一上游、使用客戶端的憑證，計入主模型帳單 | 全部啟用 |
 | `off` | 不改 effort，客戶端送什麼就用什麼；只把 `luna-auto` 等別名改成 `LUNA_MODEL` | 不判斷 | 無 | 全部停用（純轉送） |
 
 選擇建議：
-- 一般使用：`luna`。
-- 沒有 OpenAI API 金鑰、不想把需求文字送到 OpenAI，或想要零額外費用：`heuristic`。長任務續跑、驗證與自審照常運作。
+- 一般使用：維持預設 `auto`。設定 `OPENAI_API_KEY` 就用 Luna，沒設定就用規則，兩種情況都不必改模式。
+- 有金鑰但仍想固定使用 Luna（例如要確認沒金鑰時會出錯，而不是默默改用規則）：`luna`。在此模式下沒金鑰時每次決策都會嘗試 Luna 再失敗退回，記錄中標示 `heuristic (luna failed: …)`。
+- 有金鑰卻不想把需求文字送到 OpenAI，或想要零額外費用：`heuristic`。長任務續跑、驗證與自審照常運作。
+- 沒有金鑰時想改用判官模型而不是規則：`LUNA_AUTO_FALLBACK=llm`（維持 `auto`）。
 - 想用自己指定的模型判斷 effort：`llm`（實驗性質，判官會花主模型的額度）。
 - 只想用別名、完全不介入：`off`。
 
@@ -138,7 +141,7 @@ luna-decision-openai codex       # 背景啟動的 proxy 會沿用這個視窗�
 LUNA_MODE=heuristic
 ```
 
-確認目前模式：`serve` 啟動列的 `mode=…`，或 `/luna/health` 回傳的 `mode`。每筆決策的 `source` 欄位顯示實際由誰決定，例如 `luna`、`heuristic (luna considered)`、`heuristic (luna failed: …)`、`judge`、`model only`。
+確認目前模式：`serve` 啟動列的 `mode=…`（`auto` 時顯示 `auto→luna` 或 `auto→heuristic`，依是否設定了金鑰；沒有金鑰時另印一行說明客戶端自帶 OpenAI 金鑰仍會啟用 Luna），或 `/luna/health` 回傳的 `mode`（`auto` 時另有 `autoFallback`）。每筆決策的 `source` 欄位顯示實際由誰決定，例如 `luna`、`heuristic (luna considered)`、`heuristic (luna failed: …)`、`judge`、`model only`。
 
 ### Effort 如何決定
 
@@ -242,7 +245,7 @@ proxy 會暫扣上游的 `response.completed`。若同時符合以下條件，�
 3. 合併：`end` 為 `needs_user` → `unfinished` = P(will_continue)。其他情況 → max(P(will_continue), P(in_progress), 規則分數)。例外：`end` 為 `done` 且機率 ≥ 0.9 時，不採計 `in_progress`。
 4. 規則分數：徵求許可的問句（would you like me to…?、要我…嗎？）或第一人稱承諾（next I'll、I will fix…、接下來我會、我會再修…）為 0.75；驗證關卡（見下）為 0.7／0.65；最後一步失敗為 0.5；其餘為 0.1。「if you want, I'll add docs」這類條件式提議不算承諾。
 
-Luna 失敗時只用規則。`LUNA_MODE=heuristic` 或 `llm` 也只用規則；`LUNA_MODE=off` 不續跑。
+Luna 失敗時只用規則。`LUNA_MODE=heuristic` 或 `llm`，以及 `auto` 在沒有金鑰的請求，也只用規則；`LUNA_MODE=off` 不續跑。
 
 ## 憑證、上游與費用
 
@@ -362,7 +365,8 @@ aider 範例（未實測）：`aider --openai-api-base http://127.0.0.1:8791/v1 
 | `LUNA_AUTO_MODELS` | `luna-auto,auto` | 會交由 router 改寫為 `LUNA_MODEL` 的客戶端模型名稱 |
 | `LUNA_LEVELS` | `low,medium,high,xhigh,max` | effort 階梯，必須由低到高、不可重複，也是 Luna 的選項；luna 模式至少要 2 級 |
 | `LUNA_DEFAULT_EFFORT` | `medium` | 新 turn 的規則預設、續跑後的下限；必須在階梯內（`--effort` 設定同一個值） |
-| `LUNA_MODE` | `luna` | `luna`；`heuristic`（只用規則，不呼叫 Luna）；`llm`（以 `LUNA_JUDGE_MODEL` 或主模型做判官，只在 Responses 第 2 步起）；`off`（不改 effort，只改別名模型） |
+| `LUNA_MODE` | `auto` | `auto`（有金鑰用 `luna`，沒有用 `LUNA_AUTO_FALLBACK`）；`luna`；`heuristic`（只用規則，不呼叫 Luna）；`llm`（以 `LUNA_JUDGE_MODEL` 或主模型做判官，只在 Responses 第 2 步起）；`off`（不改 effort，只改別名模型）。詳見「運作模式」 |
+| `LUNA_AUTO_FALLBACK` | `heuristic` | `auto` 模式下沒有金鑰的請求改用的模式：`heuristic` 或 `llm` |
 | `LUNA_DECISION_URL` | `https://api.openai.com/v1/decisions` | Decisions API 端點 |
 | `LUNA_DECISION_MODEL` | `gpt-6-luna` | 決策模型 |
 | `LUNA_API_KEY` | 空 | 決策用金鑰，優先於 `OPENAI_API_KEY` |
@@ -445,5 +449,6 @@ npm test     # node --test (test/)
 
 | 版本 | 內容 |
 |---|---|
+| v0.3.0 | 新增 `LUNA_MODE=auto` 並設為預設：每個請求有 Luna 金鑰就用 `luna`，沒有就用 `LUNA_AUTO_FALLBACK`（預設 `heuristic`，可選 `llm`）；`serve` 顯示 `auto→luna`／`auto→heuristic`；`/luna/health` 回報 `autoFallback` |
 | v0.2.0 | 長任務持續與自我迭代：續跑上限改為每 turn 20 次＋無進展上限（`LUNA_MAX_STALLS`，預設 2）；續跑後的焦點提醒；只改模型的請求也會在新 turn 重設續跑預算；驗證關卡（`LUNA_VERIFY`：改了程式未驗證或測試仍失敗即續跑）；自我審查輪（`LUNA_REVIEW_ROUNDS`）；續跑提醒引用失敗指令並警告停滯；`stats` 與 `/luna/health` 計入自我審查 |
 | v0.1.0 | 初始建立：決策改由 OpenAI `gpt-6-luna`（Decisions API）；主模型預設 `gpt-6.1-terra`，可選 `gpt-6.1-sol`、`gpt-6-astra`；effort 階梯 `low`～`max`；規則把關與續跑；CLI `luna-decision-openai`（埠 8791、profile `luna-decision`） |
