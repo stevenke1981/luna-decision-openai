@@ -19,14 +19,14 @@ test('addGlobal puts our keys before every table and comments out the ones it re
   const out = addGlobal(USER, config);
   const lines = out.split('\n');
   const firstTable = lines.findIndex((l) => l.startsWith('['));
-  const ours = ['model_provider = "luna"', 'model = "gpt-6.1-terra"', 'model_reasoning_effort = "medium"'];
+  const ours = ['model_provider = "luna-decision"', 'model = "gpt-6.1-terra"', 'model_reasoning_effort = "medium"'];
   for (const line of ours) assert.ok(lines.indexOf(line) < firstTable, line);
   assert.ok(lines.includes('# luna-decision-openai saved: model = "gpt-5"'));
   assert.ok(lines.includes('# luna-decision-openai saved: model_reasoning_effort = "high"'));
   // Keys inside other tables and unrelated top-level keys are left alone.
   assert.ok(lines.includes('model = "not a top-level key"'));
   assert.ok(lines.includes('approval_policy = "on-request"'));
-  assert.match(out, /\[model_providers\.luna\]\nname = "Luna Decision OpenAI"\nbase_url = "http:\/\/127\.0\.0\.1:8790\/v1"\nwire_api = "responses"\nrequires_openai_auth = true\n/);
+  assert.match(out, /\[model_providers\.luna-decision\]\nname = "Luna Decision OpenAI"\nbase_url = "http:\/\/127\.0\.0\.1:8790\/v1"\nwire_api = "responses"\nrequires_openai_auth = true\n/);
   // One assignment per top-level key, so the file stays valid TOML.
   assert.equal(lines.filter((l) => /^model\s*=/.test(l)).length, 2);
   assert.equal(lines.slice(0, firstTable).filter((l) => /^model\s*=/.test(l)).length, 1);
@@ -50,6 +50,6 @@ test('addGlobal keeps CRLF line endings and works on an empty or table-less file
   assert.match(addGlobal('model = "x"\n', { ...config, port: 9999 }), /^# luna-decision-openai saved: model = "x"$/m);
 });
 
-test('addGlobal refuses a file that defines its own luna provider', () => {
-  assert.throws(() => addGlobal('[model_providers.luna]\nname = "mine"\n', config), /already defines \[model_providers\.luna\]/);
+test('addGlobal refuses a file that defines its own luna-decision provider', () => {
+  assert.throws(() => addGlobal('[model_providers.luna-decision]\nname = "mine"\n', config), /already defines \[model_providers\.luna-decision\]/);
 });

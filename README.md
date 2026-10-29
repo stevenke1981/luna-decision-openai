@@ -264,7 +264,7 @@ luna-decision-openai serve             # keep it running; the desktop app does n
 luna-decision-openai uninstall         # restores config.toml
 ```
 
-`--global` 在 `config.toml` 最前面加入 `model_provider`、`model`、`model_reasoning_effort`，並在檔尾加入 `[model_providers.luna]`。這些行夾在 `# >>> luna-decision-openai` 與 `# <<< luna-decision-openai` 標記之間。原本的同名頂層設定改為 `# luna-decision-openai saved: …` 註解，`uninstall` 會逐行還原。
+`--global` 在 `config.toml` 最前面加入 `model_provider`、`model`、`model_reasoning_effort`，並在檔尾加入 `[model_providers.luna-decision]`。這些行夾在 `# >>> luna-decision-openai` 與 `# <<< luna-decision-openai` 標記之間。原本的同名頂層設定改為 `# luna-decision-openai saved: …` 註解，`uninstall` 會逐行還原。
 
 注意：之後**所有** Codex 客戶端（包括直接執行的 `codex`）都會經過 proxy，proxy 沒開就連不上。proxy 只處理 HTTP，若桌面版改走 websocket 傳輸，請求不會經過 proxy。桌面版尚未實測。
 

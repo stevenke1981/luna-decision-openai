@@ -203,7 +203,7 @@ test('install --global makes luna-decision-openai the default in config.toml wit
     fs.writeFileSync(main, original);
     const first = await run(['install', '--global'], env);
     assert.equal(first.code, 0, first.out);
-    assert.match(fs.readFileSync(main, 'utf8'), /^model_provider = "luna"$/m);
+    assert.match(fs.readFileSync(main, 'utf8'), /^model_provider = "luna-decision"$/m);
     assert.equal(fs.readFileSync(`${main}.luna-decision-openai.bak`, 'utf8'), original);
     assert.ok(fs.existsSync(path.join(codexHome, 'luna-decision.config.toml')));
 

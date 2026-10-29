@@ -4,7 +4,7 @@
 // kept as a comment that `removeGlobal` turns back into the original line.
 // Pure: text in, text out.
 
-export const PROVIDER = 'luna';
+export const PROVIDER = 'luna-decision';
 const BEGIN = '# >>> luna-decision-openai (remove with: luna-decision-openai uninstall)';
 const END = '# <<< luna-decision-openai';
 const SAVED = '# luna-decision-openai saved: ';
@@ -58,7 +58,7 @@ export function removeGlobal(text) {
 
 /**
  * Makes luna-decision-openai the default provider of a Codex config.toml. Running it again replaces
- * the earlier edit. Throws when the file defines its own [model_providers.luna].
+ * the earlier edit. Throws when the file defines its own [model_providers.luna-decision].
  * @param {string} text the current config.toml ('' when there is none)
  * @param {{host:string, port:number, model:string, defaultEffort:string, provider?:string}} config
  */
