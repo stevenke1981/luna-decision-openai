@@ -15,8 +15,8 @@ import { addGlobal, removeGlobal, hasGlobal, authLine } from '../src/codexconfig
 import { loadEnvFiles } from '../src/envfile.js';
 
 const NAME = APP;
-// Codex profile name; `codex -p luna` selects the provider written by `install`.
-const PROFILE = 'luna';
+// Codex profile name; `codex -p luna-decision` selects the provider written by `install`.
+const PROFILE = 'luna-decision';
 
 const HELP = `${NAME} — one main GPT model (GPT-6.1 Terra by default), reasoning effort low..max picked per
 generation by OpenAI's Luna Decisions model (gpt-6-luna, billed to your API key), and long-task help
@@ -197,7 +197,7 @@ function serve(config) {
       if (isOurProxy(running)) {
         console.log(`${NAME}: ${compareBuild(running).message}`);
         console.log('Following decisions from the configured LUNA_HOME. Older proxies record decisions after responses complete.');
-        console.log('Send requests through luna-decision-openai codex or codex -p luna; Ctrl+C stops viewing only.');
+        console.log(`Send requests through luna-decision-openai codex or codex -p ${PROFILE}; Ctrl+C stops viewing only.`);
         return tail(config, running.eventStream === true);
       }
     }

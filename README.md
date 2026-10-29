@@ -4,7 +4,7 @@
 
 本專案是本機 proxy（預設 `http://127.0.0.1:8791/v1`），供 Codex、opencode、aider 等客戶端使用。它只執行一個主模型：預設 `gpt-6.1-terra`，可改選 `gpt-6.1-sol` 或 `gpt-6-astra`。每次 generation 送出前，proxy 透過 OpenAI [Decisions API](https://developers.openai.com/api/docs/guides/decisions) 呼叫 `gpt-6-luna`，決定這一步要用哪一級 reasoning effort（預設階梯 `low`、`medium`、`high`、`xhigh`、`max`）。Luna 的呼叫費用計入你的 OpenAI API 金鑰。Luna 棄權、逾時或失敗時改由本地規則決定，而且規則同時把關 Luna 的結果。
 
-本專案衍生自 laya-gpt。預設埠 8791 與 Codex profile `luna` 讓它可以和 laya-gpt（8790）同時執行。
+本專案衍生自 laya-gpt。預設埠 8791 與 Codex profile `luna-decision` 讓它可以和 laya-gpt（8790）同時執行。
 
 ## Quick start
 
@@ -14,8 +14,8 @@ npm link                                    # required once: registers the luna-
 luna-decision-openai --version
 $env:OPENAI_API_KEY = "sk-..."              # the key Luna calls are billed to (this window only; or use .env.local, see API keys)
 luna-decision-openai probe                  # one live gpt-6-luna call: checks the key and the call shape
-luna-decision-openai install                # writes $CODEX_HOME\luna.config.toml (default ~\.codex)
-luna-decision-openai codex                  # starts the proxy in the background if needed, then runs: codex -p luna
+luna-decision-openai install                # writes $CODEX_HOME\luna-decision.config.toml (default ~\.codex)
+luna-decision-openai codex                  # starts the proxy in the background if needed, then runs: codex -p luna-decision
 ```
 
 ```bash
@@ -47,13 +47,13 @@ If `npm link` was run but the command is not found, reopen the terminal. You can
 2. 在專案資料夾執行 `npm link`，註冊 `luna-decision-openai` 指令（必做一次）。
 3. 設定金鑰（見下節「API keys／金鑰設定」）：系統環境變數、專案的 `.env.local`，或 `~/.luna-decision-openai/.env.local`。只想對目前視窗生效時，PowerShell 用 `$env:OPENAI_API_KEY = "sk-..."`，bash 用 `export OPENAI_API_KEY=sk-...`。
 4. `luna-decision-openai probe`：實際呼叫一次 `gpt-6-luna`，確認金鑰與呼叫形狀。
-5. `luna-decision-openai install`，然後 `luna-decision-openai codex`（自動啟動 proxy 並以 `codex -p luna` 開啟 Codex）。
+5. `luna-decision-openai install`，然後 `luna-decision-openai codex`（自動啟動 proxy 並以 `codex -p luna-decision` 開啟 Codex）。
 6. 要換主模型：`luna-decision-openai codex --model gpt-6.1-sol`。其他客戶端請把 base URL 設為 `http://127.0.0.1:8791/v1`、model 設為 `luna-auto`。
 
 ## 安裝需求
 
 - Node.js ≥ 22.15。`package.json` 沒有 dependencies，不需要 `npm install`。
-- Codex CLI。在 Windows 上，`codex` 子指令要找 npm 安裝的版本（`codex.cmd` 與 `@openai/codex`）；找不到時會提示改用 `serve` 再執行 `codex -p luna`。
+- Codex CLI。在 Windows 上，`codex` 子指令要找 npm 安裝的版本（`codex.cmd` 與 `@openai/codex`）；找不到時會提示改用 `serve` 再執行 `codex -p luna-decision`。
 - OpenAI API 金鑰（`OPENAI_API_KEY` 或 `LUNA_API_KEY`）。`LUNA_MODE=heuristic` 只用規則，不需要金鑰。
 
 ## API keys / 金鑰設定
@@ -209,16 +209,16 @@ Luna 失敗時只用規則。`LUNA_MODE=heuristic` 或 `llm` 也只用規則；`
 ## 安裝與使用
 
 ```powershell
-luna-decision-openai install           # writes $CODEX_HOME\luna.config.toml
-luna-decision-openai codex             # starts the proxy if needed, then: codex -p luna
+luna-decision-openai install           # writes $CODEX_HOME\luna-decision.config.toml
+luna-decision-openai codex             # starts the proxy if needed, then: codex -p luna-decision
 luna-decision-openai codex exec "implement the plan in TODO.md and make the tests pass"
 
 # live view: two windows
 luna-decision-openai serve             # window 1
-codex -p luna                          # window 2
+codex -p luna-decision                          # window 2
 ```
 
-`install` 寫入的 profile 包含：`model = "gpt-6.1-terra"`（或 `--model` 指定者）、`model_reasoning_effort = "medium"`（`LUNA_DEFAULT_EFFORT`）、`model_provider = "luna"`，以及指向 `http://127.0.0.1:8791/v1`、`wire_api = "responses"`、`requires_openai_auth = true` 的 `[model_providers.luna]`。驗證行依 `--provider` 而定：`chatgpt` 寫入 `requires_openai_auth = true`（沿用 Codex 既有的登入）；`openai` 寫入 `env_key = "OPENAI_API_KEY"`；`openrouter` 寫入 `env_key = "OPENROUTER_API_KEY"`。`install --global` 寫入的 provider 表也使用同一行。檔案存在且不是本工具寫入時會拒絕覆寫，需加 `--force`。
+`install` 寫入的 profile 包含：`model = "gpt-6.1-terra"`（或 `--model` 指定者）、`model_reasoning_effort = "medium"`（`LUNA_DEFAULT_EFFORT`）、`model_provider = "luna-decision"`，以及指向 `http://127.0.0.1:8791/v1`、`wire_api = "responses"`、`requires_openai_auth = true` 的 `[model_providers.luna-decision]`。驗證行依 `--provider` 而定：`chatgpt` 寫入 `requires_openai_auth = true`（沿用 Codex 既有的登入）；`openai` 寫入 `env_key = "OPENAI_API_KEY"`；`openrouter` 寫入 `env_key = "OPENROUTER_API_KEY"`。`install --global` 寫入的 provider 表也使用同一行。檔案存在且不是本工具寫入時會拒絕覆寫，需加 `--force`。
 
 `codex` 子指令會把 `--model` 同時傳給 Codex 的 `-m`。若 proxy 已在執行，請求中的其他已知模型 id（例如 `gpt-6.1-sol`）會原樣轉送，只改 effort。
 
@@ -227,10 +227,10 @@ codex -p luna                          # window 2
 | 指令 | 用途 |
 |---|---|
 | `luna-decision-openai serve [--model M] [--effort E]` | 前景執行 proxy 並即時顯示決策。若埠已有本專案的 proxy，改為追蹤它的決策，不另起一個 |
-| `luna-decision-openai install [--model M] [--effort E] [--provider P] [--force]` | 寫入 `$CODEX_HOME\luna.config.toml`（profile `luna`）。`--provider chatgpt`（預設）、`openai`（`OPENAI_API_KEY`）或 `openrouter`（`OPENROUTER_API_KEY`）決定主模型的驗證方式，見「API keys」 |
+| `luna-decision-openai install [--model M] [--effort E] [--provider P] [--force]` | 寫入 `$CODEX_HOME\luna-decision.config.toml`（profile `luna-decision`）。`--provider chatgpt`（預設）、`openai`（`OPENAI_API_KEY`）或 `openrouter`（`OPENROUTER_API_KEY`）決定主模型的驗證方式，見「API keys」 |
 | `luna-decision-openai install --global` | 另把 luna-decision-openai 設為 `config.toml` 的預設 provider（給桌面版與 IDE 擴充；見下節） |
 | `luna-decision-openai uninstall` | 還原 `config.toml` 並刪除 profile 檔（`config.toml.luna-decision-openai.bak` 保留） |
-| `luna-decision-openai codex [--model M] [args...]` | 必要時背景啟動 proxy，再執行 `codex -p luna [args...]` |
+| `luna-decision-openai codex [--model M] [args...]` | 必要時背景啟動 proxy，再執行 `codex -p luna-decision [args...]` |
 | `luna-decision-openai models` | 列出已知主模型（`*` 為預設）與 effort 階梯 |
 | `luna-decision-openai probe [text]` | 實際呼叫一次 `gpt-6-luna`，印出回答、換算的 effort、耗時、輸入 tokens 與費用上限。只使用 `OPENAI_API_KEY` 或 `LUNA_API_KEY`，不使用客戶端金鑰 |
 | `luna-decision-openai tail` | 即時追蹤決策 |
@@ -387,4 +387,4 @@ npm test     # node --test (test/)
 
 | 版本 | 內容 |
 |---|---|
-| v0.1.0 | 初始建立：決策改由 OpenAI `gpt-6-luna`（Decisions API）；主模型預設 `gpt-6.1-terra`，可選 `gpt-6.1-sol`、`gpt-6-astra`；effort 階梯 `low`～`max`；規則把關與續跑；CLI `luna-decision-openai`（埠 8791、profile `luna`） |
+| v0.1.0 | 初始建立：決策改由 OpenAI `gpt-6-luna`（Decisions API）；主模型預設 `gpt-6.1-terra`，可選 `gpt-6.1-sol`、`gpt-6-astra`；effort 階梯 `low`～`max`；規則把關與續跑；CLI `luna-decision-openai`（埠 8791、profile `luna-decision`） |
