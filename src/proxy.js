@@ -229,7 +229,9 @@ export function createProxy(config, deps = {}) {
   const print = deps.print ?? ((s) => process.stdout.write(`${s}\n`));
   const roles = deps.roles ?? packRoles(config, print);
   const roleById = new Map(roles.map((r) => [r.id, r]));
-  const router = createRouter(config, { ...deps, roles });
+  // LUNA_ROLES at start; POST /luna/roles {"enabled":bool} switches it while running.
+  let rolesOn = config.roles !== false;
+  const router = createRouter(config, { ...deps, roles, rolesOn: () => rolesOn });
   const log = deps.log ?? createDecisionLog(config);
   const openRouterOf = deps.isOpenRouter ?? isOpenRouter;
   const stopCheckFn = deps.stopCheckFn ?? lunaStopCheck;
@@ -450,8 +452,23 @@ export function createProxy(config, deps = {}) {
       res.writeHead(200, { 'content-type': 'application/json' });
       return res.end(JSON.stringify({
         ok: true, ...identity, mode: config.mode, ...(config.mode === 'auto' ? { autoFallback: config.autoFallback } : {}),
-        model: config.model, ladder: config.ladder, decisionModel: config.decisionModel, roles: roles.length, stats,
+        model: config.model, ladder: config.ladder, decisionModel: config.decisionModel, roles: roles.length, rolesEnabled: rolesOn, stats,
       }));
+    }
+    if (req.url === '/luna/roles') {
+      if (req.method === 'POST') {
+        let enabled;
+        try {
+          enabled = JSON.parse((await readBody(req)).toString('utf8')).enabled;
+        } catch {
+          enabled = undefined;
+        }
+        if (typeof enabled !== 'boolean') throw new BadRequest('POST /luna/roles needs {"enabled": true|false}');
+        rolesOn = enabled;
+        if (!config.quiet) print(`[luna] specialists ${rolesOn ? 'on' : 'off'}`);
+      }
+      res.writeHead(200, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({ enabled: rolesOn, roles: roles.length }));
     }
     const raw = await readBody(req);
     const path = req.url.split('?')[0];
@@ -483,5 +500,5 @@ export function createProxy(config, deps = {}) {
       }
     });
   });
-  return { server, stats, router, roles };
+  return { server, stats, router, roles, rolesEnabled: () => rolesOn };
 }

@@ -108,6 +108,9 @@ export function loadConfig(env = process.env) {
     // optionally `|set`. Empty turns the feature off. On a new turn Luna picks one of them.
     rolePack: (env.LUNA_ROLE_PACK || '').trim(),
     roleSet: (env.LUNA_ROLE_SET || '').trim(),
+    // Whether the specialists are used when the proxy starts; `roles on|off` (POST /luna/roles)
+    // switches a running proxy without a restart.
+    roles: switchEnv(env, 'LUNA_ROLES', 'on'),
     // Below this confidence Luna's pick is ignored (no specialist for the turn).
     roleMinConfidence: probabilityEnv(env, 'LUNA_ROLE_MIN_CONFIDENCE', 0.4),
     // Also suggest the pack's native Codex subagent (team_<role>) for the chosen role.

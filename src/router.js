@@ -68,7 +68,9 @@ function turnFields(prev) {
   return out;
 }
 
-export function createRouter(config, { judgeFn = judge, decideFn = lunaDecide, roles = [] } = {}) {
+export function createRouter(config, { judgeFn = judge, decideFn = lunaDecide, roles = [], rolesOn = () => true } = {}) {
+  // The specialists in use right now: none while they are switched off.
+  const activeRoles = () => (rolesOn() ? roles : []);
   const sessions = new Map();
   const ladder = config.ladder;
   const defaultLevel = Math.max(0, ladder.indexOf(config.defaultEffort));
@@ -86,7 +88,7 @@ export function createRouter(config, { judgeFn = judge, decideFn = lunaDecide, r
       try {
         const d = await decideFn(turn, {
           ...decisionOptions(config, apiKey), ladder, minConfidence: config.minConfidence, quantile: config.effortQuantile,
-          roles, roleMinConfidence: config.roleMinConfidence,
+          roles: activeRoles(), roleMinConfidence: config.roleMinConfidence,
         });
         const useLuna = turn.steps.length === 0 || d.target > heuristic.target;
         return { a: combineEffort(d, heuristic, turn.steps.length === 0), source: useLuna ? 'luna' : 'heuristic (luna considered)', cost: d.cost ?? null,
@@ -115,9 +117,10 @@ export function createRouter(config, { judgeFn = judge, decideFn = lunaDecide, r
   // The specialist for a new turn: Luna's pick when it was asked (its "none" stands), else
   // the request's words. Nothing without packs.
   function pickRole(turn, lunaRole) {
-    if (roles.length === 0) return {};
+    const active = activeRoles();
+    if (active.length === 0) return {};
     if (lunaRole !== undefined) return lunaRole ? { role: lunaRole, roleSource: 'luna' } : {};
-    const id = ruleRole(turn.userText, roles);
+    const id = ruleRole(turn.userText, active);
     return id ? { role: id, roleSource: 'rules' } : {};
   }
 
@@ -151,7 +154,8 @@ export function createRouter(config, { judgeFn = judge, decideFn = lunaDecide, r
       hold: state.hold,
       reasons: state.reasons,
       source,
-      ...(kept.role ? { role: kept.role, roleSource: kept.roleSource } : {}),
+      // Switched off mid-turn, the turn's specialist is kept but not used.
+      ...(kept.role && rolesOn() ? { role: kept.role, roleSource: kept.roleSource } : {}),
       ...(suggestions ? { suggestions } : {}),
       ...(state.level !== a.target ? { adjustment: 'session policy' } : {}),
       cost,

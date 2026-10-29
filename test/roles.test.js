@@ -405,6 +405,66 @@ test('createProxy loads LUNA_ROLE_PACK and reports the count on /luna/health', a
   assert.match(printed[0], /^\[luna\] warning: no specialists: LUNA_ROLE_PACK .*nope\.zip/);
 });
 
+test('LUNA_ROLES=off starts with the specialists off; POST /luna/roles switches them while running', async () => {
+  const seen = [];
+  const upstream = http.createServer((req, res) => {
+    let raw = '';
+    req.on('data', (c) => (raw += c));
+    req.on('end', () => {
+      seen.push(JSON.parse(raw));
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end('{"id":"r","output":[]}');
+    });
+  });
+  const upPort = await listen(upstream);
+  const config = loadConfig({ LUNA_UPSTREAM: `http://127.0.0.1:${upPort}`, LUNA_HOME: '.luna-test', LUNA_MODE: 'heuristic', LUNA_ROLES: 'off' });
+  const printed = [];
+  const { server, stats } = createProxy(config, { roles: [PY], log: { write() {} }, print: (s) => printed.push(s) });
+  const port = await listen(server);
+  const base = `http://127.0.0.1:${port}`;
+  const ask = (text) => fetch(`${base}/v1/responses`, { method: 'POST', body: JSON.stringify({ model: 'gpt-x', input: [user(text)], reasoning: { effort: 'low' } }) });
+  const switchTo = async (body) => fetch(`${base}/luna/roles`, { method: 'POST', body });
+  try {
+    await ask('port this to python');
+    assert.equal(seen[0].input.at(-1).role, 'user', 'off: nothing added');
+    assert.deepEqual(await (await fetch(`${base}/luna/roles`)).json(), { enabled: false, roles: 1 });
+
+    assert.deepEqual(await (await switchTo('{"enabled":true}')).json(), { enabled: true, roles: 1 });
+    assert.match(printed.at(-1), /specialists on/);
+    await ask('port that one to python too');
+    assert.equal(seen[1].input.at(-1).role, 'developer');
+    assert.equal((await (await fetch(`${base}/luna/health`)).json()).rolesEnabled, true);
+
+    // Off mid-turn: the turn's specialist is no longer handed over.
+    await switchTo('{"enabled":false}');
+    await fetch(`${base}/v1/responses`, { method: 'POST', body: JSON.stringify({ model: 'gpt-x', input: [user('port that one to python too'), ...shell('a')], reasoning: { effort: 'low' } }) });
+    assert.equal(seen[2].input.at(-1).type, 'function_call_output');
+    assert.deepEqual(stats.byRole, { python_engineer: 1 });
+
+    assert.equal((await switchTo('{"enabled":"yes"}')).status, 400);
+    assert.equal((await switchTo('not json')).status, 400);
+  } finally {
+    server.close();
+    upstream.close();
+  }
+});
+
+test('router: switched off, neither Luna nor the rules are asked for a specialist', async () => {
+  let on = false;
+  const asked = [];
+  const decideFn = async (turn, opts) => {
+    asked.push(opts.roles.length);
+    return { target: 1, hold: 0, release: false, stuck: null, reasons: ['luna'], cost: null };
+  };
+  const router = createRouter(loadConfig({ LUNA_MODE: 'luna', OPENAI_API_KEY: 'sk-x' }), { decideFn, roles: [PY], rolesOn: () => on });
+  const input = [user('port the CLI to python')];
+  assert.equal((await router.route({ input }, 's', null, parseTurn(input))).role, undefined);
+  on = true;
+  const next = [...input, ...shell('a'), user('now port the tests to python')];
+  assert.equal((await router.route({ input: next }, 's', null, parseTurn(next))).role, 'python_engineer');
+  assert.deepEqual(asked, [0, 1]);
+});
+
 test('proxy: a bare string input keeps the request when the specialist is added', async () => {
   const h = await proxyWith([PY]);
   try {
