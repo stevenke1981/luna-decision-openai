@@ -247,6 +247,64 @@ proxy 會暫扣上游的 `response.completed`。若同時符合以下條件，�
 
 Luna 失敗時只用規則。`LUNA_MODE=heuristic` 或 `llm`，以及 `auto` 在沒有金鑰的請求，也只用規則；`LUNA_MODE=off` 不續跑。
 
+## 專家角色：讓 Luna 選擇由哪一個 agent 來做（`LUNA_ROLE_PACK`）
+
+設定一個或多個「專家包」後，每個新 turn 由 Luna 從包內的專家中挑一位最適合的，proxy 再把這位專家的工作方式交給主模型，整個 turn 都適用。這個問題附在原本的 effort 決策呼叫中一起問，不會多一次 API 請求。
+
+支援兩種包，zip 或解壓後的資料夾都可以：
+
+| 包的種類 | 辨識方式 | 每位專家 | 交給主模型的內容 |
+|---|---|---|---|
+| 團隊工作包（如 `agent-team-workflow`） | 有 `config/registry.json` | registry 中的一個職位（role） | 職位名稱、工作方法、操作步驟、交付物、完成條件 |
+| 技能包（如 `storage-skills-pack`） | 一個或多個 `*/SKILL.md` | 每個 `SKILL.md`（取 front matter 的 `name`、`description`） | 技能說明與 `SKILL.md` 內文（前 1,500 字） |
+
+zip 支援一般的 stored／deflated 格式（含檔尾註解、data descriptor）；zip64 不支援，請解壓後指定資料夾。解壓後單一檔案超過 8 MB 的包會被拒絕。`SKILL.md` 的 front matter 可以有 UTF-8 BOM、CRLF、跨行或 `|`／`>` 區塊寫法的 `description`。
+
+可以同時載入多個包，例如軟體研發加上日後的遊戲開發、影片製作、音樂製作包，所有專家合併成一份清單由 Luna 挑選。新增領域只要把包加進 `LUNA_ROLE_PACK`，不需改程式。
+
+```ini
+# .env.local（以 ; 分隔多個包；可在包後加 |組合 指定職位組合）
+LUNA_ROLE_PACK=E:\install_skills\agent-team-workflow.zip;E:\install_skills\storage-skills-pack-v1.0.zip
+# 日後例：…;E:\packs\game-dev-pack.zip;E:\packs\av-team-workflow.zip|shorts
+```
+
+組合用 `|` 分隔而不用 `#`：`.env` 會把 `#` 之後當成註解，而且路徑本身可能含 `#`（例如 `C#`）。
+
+**挑選的範圍**（`LUNA_ROLE_SET`，或每個包後面的 `|組合`）：
+- 團隊包：預設取 `product` profile 中的實作職位（`mode` 為 `author`），`agent-team-workflow` 為 13 位。可改成其他 profile 名稱（如 `lean`、`full`；若該 profile 沒有實作職位，則取其全部職位）、`author`（所有實作職位，26 位），或逗號分隔的職位 id。
+- 技能包：全部技能。
+- 共用的 `LUNA_ROLE_SET` 為 profile 名稱時，不適用的包（例如技能包沒有 `product`）改用該包預設；為逗號分隔的 id 時，各包只取清單中有的 id，任何一個 id 在所有包中都找不到則報錯。寫在包後面的 `|組合` 必須適用該包，否則報錯。
+- 相同 id（不同包之間或同一包內）以先出現的為準；名為 `none` 的專家會被略過，因為 `none` 保留給「不指派」。
+- 包讀取失敗（檔案不見、格式錯誤、組合不適用）時，`serve` 印出警告並在沒有專家的情況下照常運作，effort 決策不受影響；`luna-decision-openai roles` 會顯示完整錯誤。
+
+**如何決定**：
+- 有 Luna 金鑰時：新 turn 的 Decisions 呼叫多一題 `choice`，選項為每位專家（名稱與一行說明）加上 `none`（問答、閒聊或沒有適合的專家）。Luna 的信心低於 `LUNA_ROLE_MIN_CONFIDENCE`（預設 0.4）或選 `none` 時，該 turn 不指派專家。
+- 沒有金鑰（`auto→heuristic`、`heuristic`、`llm`）或 Luna 呼叫失敗時：依需求文字的關鍵字指派。團隊職位依內建規則（pytest／測試 → `test_engineer`，README／文件 → `technical_writer`，Python → `python_engineer` 等）；技能依名稱中的關鍵字（例如 `storage-backup-migration` 需要需求中出現 backup、migration 其中兩個詞）。沒有命中就不指派。
+- 選出的專家在整個 turn 內不變，新 turn 重新挑選。只改模型、不帶 reasoning 的請求不指派。沒有需求文字時不問專家題目。
+- Luna 沒有回答專家題目時（缺答或拒答），改由規則指派。
+- 若 Decisions API 以 HTTP 400 拒絕帶專家題目的請求，程式去掉該題重試；重試成功，表示問題出在專家題目（例如選項過多），之後 30 分鐘內不再問，改由規則指派。重試也失敗則照一般錯誤處理，不停用專家題目。
+
+**交給主模型的方式**：在每次 generation 的請求末端加一則 `[luna] For this request, work as the …` developer 訊息（Chat 為 system 訊息；`input` 為單一字串時先轉成一則 user 訊息再附加）。它會與計畫提醒、續跑焦點合併成同一則訊息，並註明「專案自己的指示優先」。`LUNA_ROLE_DELEGATE=on` 時，若團隊包有對應的 Codex 原生 subagent（`team_<職位>`，需另行安裝到 Codex），會另外建議主模型把實作委派給它並審查結果。主模型（`LUNA_MODEL`）不會因職位而切換，與工作包本身「模型繼承、不自動換」的政策一致。
+
+**實測**（2026-10-29，`gpt-6-luna`，`agent-team-workflow` 13 位加 `storage-skills-pack` 15 個技能，共 29 個選項含 `none`）：
+
+| 需求 | Luna 選擇 | effort |
+|---|---|---|
+| Add pytest unit tests for the CSV parser in src/parser.py and fix any failures | `python_engineer`（0.99） | medium |
+| Plan a 3-2-1 backup and migrate the NAS to a new filesystem | `storage-backup-migration`（0.86） | xhigh |
+| What is the difference between a mutex and a semaphore? | `none`（1.00） | low |
+
+新 turn 的決策輸入由約 1.45k tokens 增加到約 3.2k tokens（多出的專家清單未被快取），單次上限約 $0.00032；turn 中的決策不受影響。以 `serve` 搭配模擬上游實跑，主模型確實收到對應職位的 developer 訊息。
+
+**指令**：
+- `luna-decision-openai roles`：列出載入的包與專家。
+- `luna-decision-openai roles <需求文字>`：顯示規則會選哪一位。
+- `luna-decision-openai probe <需求文字>`：實際問 Luna 一次，顯示 effort、選中的專家與前三名機率。
+
+**隱私與成本**：專家清單（名稱與一行說明，每位最多 160 字）會隨新 turn 的決策送到 OpenAI；技能內文只送給主模型的上游（使用 OpenRouter 時即第三方），不送給 Luna。專家越多，每個新 turn 的決策輸入越大：`E:\install_skills` 的 11 個包全部載入共 109 位，約多 4–5k tokens，並可能超出 Decisions API 的選項上限（此時依上述 400 處理改用規則）；建議只載入需要的包，或用 `LUNA_ROLE_SET` 限縮。
+
+**已知限制**：Chat Completions 的提醒以結尾的 system 訊息送出。OpenAI 與 OpenRouter 接受這種寫法，但部分上游（如 Mistral API，以及某些 llama.cpp／Ollama 聊天模板）要求最後一則為 user 或 tool 訊息，可能拒絕；這類上游請勿設定 `LUNA_ROLE_PACK`。
+
 ## 憑證、上游與費用
 
 **Luna 用哪把金鑰**（`src/router.js` 的 `decisionKeyFor`；變數來源與順序見上節「API keys」）：
@@ -367,6 +425,10 @@ aider 範例（未實測）：`aider --openai-api-base http://127.0.0.1:8791/v1 
 | `LUNA_DEFAULT_EFFORT` | `medium` | 新 turn 的規則預設、續跑後的下限；必須在階梯內（`--effort` 設定同一個值） |
 | `LUNA_MODE` | `auto` | `auto`（有金鑰用 `luna`，沒有用 `LUNA_AUTO_FALLBACK`）；`luna`；`heuristic`（只用規則，不呼叫 Luna）；`llm`（以 `LUNA_JUDGE_MODEL` 或主模型做判官，只在 Responses 第 2 步起）；`off`（不改 effort，只改別名模型）。詳見「運作模式」 |
 | `LUNA_AUTO_FALLBACK` | `heuristic` | `auto` 模式下沒有金鑰的請求改用的模式：`heuristic` 或 `llm` |
+| `LUNA_ROLE_PACK` | 空（關閉） | 專家包路徑（zip 或資料夾），以 `;` 分隔多個，每個可加 `\|組合`；見「專家角色」 |
+| `LUNA_ROLE_SET` | 空（團隊包取 `product`，否則取全部） | 預設的職位組合：profile 名稱、`author` 或逗號分隔的 id |
+| `LUNA_ROLE_MIN_CONFIDENCE` | `0.4` | Luna 選專家的信心低於此值就不指派 |
+| `LUNA_ROLE_DELEGATE` | `off` | `on` 時另建議委派給團隊包對應的 Codex 原生 subagent（`team_<職位>`） |
 | `LUNA_DECISION_URL` | `https://api.openai.com/v1/decisions` | Decisions API 端點 |
 | `LUNA_DECISION_MODEL` | `gpt-6-luna` | 決策模型 |
 | `LUNA_API_KEY` | 空 | 決策用金鑰，優先於 `OPENAI_API_KEY` |
@@ -421,6 +483,7 @@ aider 範例（未實測）：`aider --openai-api-base http://127.0.0.1:8791/v1 
 | `src/splice.js` | SSE 切分、暫扣 `response.completed`、把續跑回應接在同一條串流上 |
 | `src/trajectory.js`、`src/chat.js` | Responses 與 Chat Completions 的軌跡解析 |
 | `src/judge.js` | `LUNA_MODE=llm` 的判官 |
+| `src/roles.js` | 專家包讀取（團隊包與技能包，zip 或資料夾）、職位組合、Luna 專家題目、規則指派與交給主模型的訊息 |
 | `src/model.js` | 模型 id、`luna-auto` 別名、effort 對齊（`minimal` → `low`） |
 | `src/proxy.js` | HTTP proxy：解壓、改寫、提醒、續跑、紀錄、`/luna/health` |
 | `src/codexconfig.js` | `install --global` 對 `config.toml` 的可逆編輯 |
@@ -449,6 +512,7 @@ npm test     # node --test (test/)
 
 | 版本 | 內容 |
 |---|---|
+| v0.4.0（分支 `feat/luna-role-routing`） | 專家角色：`LUNA_ROLE_PACK` 載入團隊工作包與技能包（可多個），新 turn 由 Luna 在同一次 Decisions 呼叫中選擇專家（沒有金鑰時依關鍵字），選中的工作方式以 developer 訊息交給主模型；新增 `roles` 指令，`probe` 顯示專家選擇 |
 | v0.3.0 | 新增 `LUNA_MODE=auto` 並設為預設：每個請求有 Luna 金鑰就用 `luna`，沒有就用 `LUNA_AUTO_FALLBACK`（預設 `heuristic`，可選 `llm`）；`serve` 顯示 `auto→luna`／`auto→heuristic`；`/luna/health` 回報 `autoFallback` |
 | v0.2.0 | 長任務持續與自我迭代：續跑上限改為每 turn 20 次＋無進展上限（`LUNA_MAX_STALLS`，預設 2）；續跑後的焦點提醒；只改模型的請求也會在新 turn 重設續跑預算；驗證關卡（`LUNA_VERIFY`：改了程式未驗證或測試仍失敗即續跑）；自我審查輪（`LUNA_REVIEW_ROUNDS`）；續跑提醒引用失敗指令並警告停滯；`stats` 與 `/luna/health` 計入自我審查 |
 | v0.1.0 | 初始建立：決策改由 OpenAI `gpt-6-luna`（Decisions API）；主模型預設 `gpt-6.1-terra`，可選 `gpt-6.1-sol`、`gpt-6-astra`；effort 階梯 `low`～`max`；規則把關與續跑；CLI `luna-decision-openai`（埠 8791、profile `luna-decision`） |
