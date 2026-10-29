@@ -15,13 +15,13 @@ const route = (router, input) => router.route({ input }, 's1', null, parseTurn(i
 
 test('config: one model, default effort medium, long-task help on', () => {
   assert.equal(config.model, 'gpt-6.1-terra');
-  assert.deepEqual(config.ladder, ['low', 'medium', 'high', 'xhigh']);
+  assert.deepEqual(config.ladder, ['low', 'medium', 'high', 'xhigh', 'max']);
   assert.equal(config.defaultEffort, 'medium');
-  assert.equal(config.port, 8790);
+  assert.equal(config.port, 8791);
   assert.deepEqual([config.continueTurns, config.maxContinues, config.continueThreshold, config.nudge], [true, 5, 0.6, true]);
   const custom = loadConfig({ LUNA_MODEL: 'gpt-x', LUNA_DEFAULT_EFFORT: 'HIGH', LUNA_CONTINUE: 'off', LUNA_MAX_CONTINUES: '1', LUNA_NUDGE: 'off' });
   assert.deepEqual([custom.model, custom.defaultEffort, custom.continueTurns, custom.maxContinues, custom.nudge], ['gpt-x', 'high', false, 1, false]);
-  assert.throws(() => loadConfig({ LUNA_DEFAULT_EFFORT: 'max' }), /LUNA_DEFAULT_EFFORT must be one of LUNA_LEVELS/);
+  assert.throws(() => loadConfig({ LUNA_DEFAULT_EFFORT: 'minimal' }), /LUNA_DEFAULT_EFFORT must be one of LUNA_LEVELS/);
   assert.throws(() => loadConfig({ LUNA_CONTINUE: 'maybe' }), /LUNA_CONTINUE must be on\|off/);
   assert.throws(() => loadConfig({ LUNA_CONTINUE_THRESHOLD: '2' }), /LUNA_CONTINUE_THRESHOLD must be 0\.\.1/);
 });
@@ -67,7 +67,9 @@ test('router: noteContinue climbs one rung per resume and stops at the top', () 
   // An unseen session counts as sitting at the default.
   assert.deepEqual(router.noteContinue('x'), { continues: 1, effort: 'high' });
   assert.deepEqual(router.noteContinue('x'), { continues: 2, effort: 'xhigh' });
-  assert.deepEqual(router.noteContinue('x'), { continues: 3, effort: 'xhigh' });
+  assert.deepEqual(router.noteContinue('x'), { continues: 3, effort: 'max' });
+  // The top of the ladder holds; the count keeps rising.
+  assert.deepEqual(router.noteContinue('x'), { continues: 4, effort: 'max' });
 });
 
 const fail = (i) => [
@@ -85,9 +87,9 @@ test('router: luna leads a new turn but inside a turn it may only raise the effo
   // The rules would start this hard request at high; luna reads it and picks medium.
   const d = await route(router, [userMsg('refactor the auth module')]);
   assert.deepEqual([d.effort, d.source], ['medium', 'luna']);
-  // Three failures in a row: the rules escalate to xhigh and luna's medium cannot lower it.
+  // Three failures in a row: the rules escalate to the top rung (max) and luna's medium cannot lower it.
   const stuck = await router.route({}, 's2', null, parseTurn([userMsg('fix it'), ...fail(1), ...fail(2), ...fail(3)]));
-  assert.equal(stuck.effort, 'xhigh');
+  assert.equal(stuck.effort, 'max');
   assert.match(stuck.reasons.join(';'), /3 failures in a row;luna medium 0.80/);
-  assert.deepEqual(seen[0], [0, 'http://127.0.0.1:8100/api/alpha/decisions', 'multilingual', 0.5]);
+  assert.deepEqual(seen[0], [0, 'https://api.openai.com/v1/decisions', 'gpt-6-luna', 0.4]);
 });

@@ -32,6 +32,12 @@ function tempDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'luna-decision-openai-test-'));
 }
 
+/** The parent environment minus every LUNA_* and OPENAI_* variable, plus the given ones. */
+function cleanEnv(extra = {}) {
+  const inherited = Object.entries(process.env).filter(([key]) => !/^(LUNA|OPENAI)_/.test(key));
+  return { ...Object.fromEntries(inherited), ...extra };
+}
+
 /** Answers /luna/health with the given payload on a free port, as another app would. */
 async function fakeHealthServer(payload) {
   const port = await freePort();
@@ -57,7 +63,8 @@ function bystander() {
 
 test('luna-decision-openai stop stops a running proxy and is a no-op when none runs', async () => {
   const port = await freePort();
-  const env = { ...process.env, LUNA_PORT: String(port), LUNA_HOME: '.luna-test', LUNA_MODE: 'heuristic', LUNA_QUIET: '1' };
+  const home = tempDir();
+  const env = cleanEnv({ LUNA_PORT: String(port), LUNA_HOME: home, LUNA_MODE: 'heuristic', LUNA_QUIET: '1' });
   const child = spawn(process.execPath, [CLI, 'serve'], { env, stdio: 'ignore' });
   const exited = new Promise((r) => child.on('exit', r));
   try {
@@ -73,6 +80,8 @@ test('luna-decision-openai stop stops a running proxy and is a no-op when none r
     assert.match(again.out, /no luna-decision-openai proxy/);
   } finally {
     child.kill();
+    await exited;
+    fs.rmSync(home, { recursive: true, force: true });
   }
 });
 
@@ -158,7 +167,7 @@ test('serve follows decisions when an existing luna-decision-openai proxy owns t
 
 test('install writes the luna Codex profile for the configured model and default effort, refusing foreign files', async () => {
   const codexHome = tempDir();
-  const env = { ...process.env, CODEX_HOME: codexHome, LUNA_PORT: '9999', LUNA_MODEL: 'gpt-6.1-terra', LUNA_HOME: codexHome };
+  const env = cleanEnv({ CODEX_HOME: codexHome, LUNA_PORT: '9999', LUNA_MODEL: 'gpt-6.1-terra', LUNA_HOME: codexHome });
   const file = path.join(codexHome, 'luna.config.toml');
   try {
     const first = await run(['install'], env);
@@ -170,7 +179,10 @@ test('install writes the luna Codex profile for the configured model and default
     assert.match(toml, /^model_reasoning_effort = "medium"$/m);
     assert.match(toml, /^base_url = "http:\/\/127\.0\.0\.1:9999\/v1"$/m);
     assert.ok(toml.indexOf('model_reasoning_effort = ') < toml.indexOf('[model_providers.luna]'), 'settings must sit above the table');
-    assert.ok(!fs.existsSync(path.join(codexHome, 'luna.config.toml')));
+    // No profile under the names this fork inherited from laya-gpt.
+    for (const legacy of ['laya.config.toml', 'layagpt.config.toml']) {
+      assert.ok(!fs.existsSync(path.join(codexHome, legacy)), legacy);
+    }
 
     fs.writeFileSync(file, 'hand written\n');
     const second = await run(['install'], env);
@@ -184,7 +196,7 @@ test('install writes the luna Codex profile for the configured model and default
 
 test('install --global makes luna-decision-openai the default in config.toml with a backup; uninstall restores it', async () => {
   const codexHome = tempDir();
-  const env = { ...process.env, CODEX_HOME: codexHome, LUNA_PORT: '9999', LUNA_HOME: codexHome };
+  const env = cleanEnv({ CODEX_HOME: codexHome, LUNA_PORT: '9999', LUNA_HOME: codexHome });
   const main = path.join(codexHome, 'config.toml');
   const original = 'model = "gpt-5"\n\n[mcp_servers.docs]\ncommand = "docs-mcp"\n';
   try {
@@ -222,7 +234,7 @@ test('stats groups decisions by effort in ladder order and counts resumed early 
   try {
     const res = await run(['stats'], { ...process.env, LUNA_HOME: home });
     assert.equal(res.code, 0, res.out);
-    assert.match(res.out, /^5 generations, 4 sessions, 1 routed by luna, 3 early stops resumed/);
+    assert.match(res.out, /^5 generations, 4 sessions, 1 routed by Luna, 3 early stops resumed/);
     assert.match(res.out, /low\s+2 gens\s+0 avg reasoning tok\s+30 output tok/);
     assert.match(res.out, /xhigh\s+1 gens\s+50 avg reasoning tok\s+100 output tok/);
     assert.match(res.out, /\n {2}-\s+1 gens/);
@@ -243,15 +255,90 @@ test('help names the luna-decision-openai commands, the variables and the port',
     assert.match(res.out, /luna-decision-openai serve/);
     assert.match(res.out, /codex -p luna/);
     for (const name of ['LUNA_MODEL (gpt-6.1-terra)', 'LUNA_DEFAULT_EFFORT (medium)', 'LUNA_CONTINUE (on|off)',
-      'LUNA_MAX_CONTINUES (5)', 'LUNA_NUDGE (on|off)', 'LUNA_PORT (8790)']) {
+      'LUNA_MAX_CONTINUES (5)', 'LUNA_NUDGE (on|off)', 'LUNA_PORT (8791)']) {
       assert.ok(res.out.includes(name), `help is missing ${name}`);
     }
-    assert.match(res.out, /http:\/\/127\.0\.0\.1:8790\/v1, model luna-auto/);
+    assert.match(res.out, /http:\/\/127\.0\.0\.1:8791\/v1, model luna-auto/);
     assert.doesNotMatch(res.out, /jev-effort|jev-sol-terra|JEV_SOL_MODEL/);
 
     const version = await run(['--version'], { ...process.env, LUNA_HOME: home });
     assert.match(version.out, /^luna-decision-openai v\d+\.\d+\.\d+ \(build [0-9a-f]{12}\)/);
   } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('models lists the main models and the effort ladder, starring gpt-6.1-terra by default', async () => {
+  const home = tempDir();
+  try {
+    const res = await run(['models'], cleanEnv({ LUNA_HOME: home }));
+    assert.equal(res.code, 0, res.out);
+    assert.match(res.out, /^\* gpt-6\.1-terra$/m);
+    assert.match(res.out, /^ {2}gpt-6\.1-sol$/m);
+    assert.match(res.out, /^ {2}gpt-6-astra$/m);
+    assert.match(res.out, /effort ladder: low → medium → high → xhigh → max \(default medium\); decisions by gpt-6-luna/);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('models --model and --model= star the chosen main model', async () => {
+  const home = tempDir();
+  const env = cleanEnv({ LUNA_HOME: home });
+  try {
+    for (const args of [['models', '--model', 'gpt-6.1-sol'], ['models', '--model=gpt-6.1-sol']]) {
+      const res = await run(args, env);
+      assert.equal(res.code, 0, res.out);
+      assert.match(res.out, /^\* gpt-6\.1-sol$/m, args.join(' '));
+      assert.match(res.out, /^ {2}gpt-6\.1-terra$/m, args.join(' '));
+    }
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('models --effort changes the default the ladder line shows; an effort off the ladder fails', async () => {
+  const home = tempDir();
+  const env = cleanEnv({ LUNA_HOME: home });
+  try {
+    const res = await run(['models', '--effort', 'high'], env);
+    assert.equal(res.code, 0, res.out);
+    assert.match(res.out, /\(default high\)/);
+    assert.doesNotMatch(res.out, /\(default medium\)/);
+
+    const bad = await run(['models', '--effort', 'turbo'], env);
+    assert.equal(bad.code, 1);
+    assert.match(bad.out, /LUNA_DEFAULT_EFFORT must be one of LUNA_LEVELS/);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('probe without an API key exits 1 and names OPENAI_API_KEY before any call to Luna', async () => {
+  const home = tempDir();
+  try {
+    const res = await run(['probe', 'refactor', 'the', 'cache'], cleanEnv({ LUNA_HOME: home }));
+    assert.equal(res.code, 1, res.out);
+    assert.match(res.out, /OPENAI_API_KEY/);
+    assert.doesNotMatch(res.out, /request:/);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('install --model gpt-6-astra writes the luna profile for that model on port 8791', async () => {
+  const codexHome = tempDir();
+  const home = tempDir();
+  try {
+    const res = await run(['install', '--model', 'gpt-6-astra'], cleanEnv({ CODEX_HOME: codexHome, LUNA_HOME: home }));
+    assert.equal(res.code, 0, res.out);
+    const toml = fs.readFileSync(path.join(codexHome, 'luna.config.toml'), 'utf8');
+    assert.match(toml, /^model = "gpt-6-astra"$/m);
+    assert.match(toml, /^model_provider = "luna"$/m);
+    assert.match(toml, /^base_url = "http:\/\/127\.0\.0\.1:8791\/v1"$/m);
+    assert.match(toml, /^\[model_providers\.luna\]$/m);
+  } finally {
+    fs.rmSync(codexHome, { recursive: true, force: true });
     fs.rmSync(home, { recursive: true, force: true });
   }
 });
